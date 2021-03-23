@@ -65,3 +65,17 @@
 #    endif
 #  endif
 #endif
+
+#ifndef WITHOUT_COA_SINGLE_TUNNEL
+#  define WITH_COA_SINGLE_TUNNEL (1)
+#  ifndef WITH_COA
+#    error WITH_COA_SINGLE_TUNNEL requires WITH_COA
+#  endif
+#  ifndef WITH_TCP
+#    error WITH_COA_SINGLE_TUNNEL requires WITH_TCP
+#  endif
+#  ifndef WITH_TLS
+#    error WITH_COA_SINGLE_TUNNEL requires WITH_TLS
+#  endif
+#endif
+
