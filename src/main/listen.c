@@ -393,6 +393,9 @@ int rad_status_server(REQUEST *request)
 {
 	int rcode = RLM_MODULE_OK;
 	DICT_VALUE *dval;
+#ifdef WITH_COA_SINGLE_TUNNEL
+	VALUE_PAIR *vp = NULL;
+#endif
 
 	switch (request->listener->type) {
 #ifdef WITH_STATS
@@ -402,6 +405,17 @@ int rad_status_server(REQUEST *request)
 		dval = dict_valbyname(PW_AUTZ_TYPE, 0, "Status-Server");
 		if (dval) {
 			rcode = process_authorize(dval->value, request);
+#ifdef WITH_COA_SINGLE_TUNNEL
+			if(request->listener->with_coa &&
+			    (vp = fr_pair_find_by_num(request->config, PW_TCP_SESSION_KEY, 0, TAG_ANY))) {
+				char const *key = vp->vp_strvalue;
+				/* do not overwrite */
+				if(!request->listener->key) {
+					RDEBUG2("Set current tunnel by key %s", key);
+					listener_store_bykey(request->listener, key);
+				}
+			}
+#endif
 		} else {
 			rcode = RLM_MODULE_OK;
 		}
@@ -783,6 +797,7 @@ static int dual_tcp_accept(rad_listen_t *listener)
 		/* recv always done on the original listener */
 		// to be implemented in later commit
 		//this->reverse_listener->send = dual_tls_send_req;
+		listener_store_byaddr(this, &sock->other_ipaddr);
 
 		home_server_t *home = talloc_zero(this, home_server_t);
 		{
@@ -2867,6 +2882,10 @@ static int _listener_free(rad_listen_t *this)
 		if (this->children) {
 			rbtree_walk(this->children, RBTREE_DELETE_ORDER, listener_unlink, this);
 		}
+
+#ifdef WITH_COA_SINGLE_TUNNEL
+		if(this->with_coa) listener_forget(this);
+#endif
 
 #ifdef WITH_TLS
 		/*
