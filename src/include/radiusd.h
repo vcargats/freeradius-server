@@ -562,6 +562,7 @@ void hup_logfile(void);
 
 /* listen.c */
 void listen_free(rad_listen_t **head);
+void listen_destroy(void);
 int listen_init(CONF_SECTION *cs, rad_listen_t **head, bool spawn_flag);
 rad_listen_t *proxy_new_listener(TALLOC_CTX *ctx, home_server_t *home, uint16_t src_port);
 RADCLIENT *client_listener_find(rad_listen_t *listener, fr_ipaddr_t const *ipaddr, uint16_t src_port);
@@ -570,6 +571,11 @@ RADCLIENT *client_listener_find(rad_listen_t *listener, fr_ipaddr_t const *ipadd
 RADCLIENT_LIST *listener_find_client_list(fr_ipaddr_t const *ipaddr, uint16_t port, int proto);
 #endif
 rad_listen_t *listener_find_byipaddr(fr_ipaddr_t const *ipaddr, uint16_t port, int proto);
+#ifdef WITH_COA_SINGLE_TUNNEL
+void listener_store_bykey(rad_listen_t *listener, const char *newkey);
+rad_listen_t *listener_find_bykey(char const *key, size_t *listcount);
+rad_listen_t *listener_find_byaddr(fr_ipaddr_t const *ipaddr, uint16_t port, size_t *listcount);
+#endif
 int rad_status_server(REQUEST *request);
 
 /* event.c */
