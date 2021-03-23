@@ -202,6 +202,9 @@ server coa-buffered-reader {
 						&COA-Packet-DST-IP-Address
 					disconnect:Packet-DST-Port := \
 						&COA-Packet-DST-Port
+					# Alternatively TCP-Session-Key may be specified
+					#disconnect:TCP-Session-Key := \
+					#	&Operator-NAS-Identifier
 					disconnect:Acct-Session-Id := \
 						&COA-Acct-Session-Id
 
@@ -224,6 +227,9 @@ server coa-buffered-reader {
 						&COA-Packet-DST-IP-Address
 					coa:Packet-DST-Port := \
 						&COA-Packet-DST-Port
+					# Alternatively TCP-Session-Key may be specified
+					#coa:TCP-Session-Key := \
+					#	&Operator-NAS-Identifier
 					coa:Acct-Session-Id := \
 						&COA-Acct-Session-Id
 

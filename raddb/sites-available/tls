@@ -46,13 +46,20 @@ listen {
 	port = 2083
 
 	#
-	#  TCP and TLS sockets can accept Access-Request and
-	#  Accounting-Request on the same socket.
+	#  TCP and TLS sockets can accept Access-Request, Accounting-Request.
+	#  TLS socket may also send CoA-Request, Disconnect-Request and accept
+	#  CoA-ACK/NAK, Disconnect-ACK/NAK on the same socket.
 	#
-	#	auth	  = only Access-Request
-	#	acct	  = only Accounting-Request
-	#	auth+acct = both
-	*	coa	  = only CoA / Disconnect requests
+	#	auth		= only Access-Request
+	#	auth+coa	= Access-Request and
+	#			  send CoA-Requet and Disconnect-Request, and
+	#			  accept CoA-ACK/NAK, Disconnect-ACK/NAK
+	#	acct		= only Accounting-Request
+	#	auth+acct	= both Access-Request and Accounting-Request
+	#	auth+acct+coa	= all: Access-Request, Accounting-Request, and
+	#			  send CoA-Requet and Disconnect-Request, and
+	#			  accept CoA-ACK/NAK, Disconnect-ACK/NAK
+	#	coa		= only CoA / Disconnect requests
 	#
 	type = auth+acct
 
@@ -391,6 +398,15 @@ listen {
 	#    		client = "/path/to/openssl verify -CApath ${..ca_path} %{TLS-Client-Cert-Filename}"
 		}
 	}
+
+	#  CoA specific parameters for auth+coa and auth+acct+coa types.  See
+	#  raddb/proxy.conf for details.
+	coa {
+		irt = 2
+		mrt = 16
+		mrc = 5
+		mrd = 30
+	}
 }
 
 clients radsec {
@@ -443,7 +459,7 @@ home_server tls {
 	port = 2083
 
 	# type can be the same types as for the "listen" section/
-	# e.g. auth, acct, auth+acct, coa
+	# e.g. auth, acct, auth+acct, auth+coa, auth+acct+coa, coa
 	type = auth
 	secret = radsec
 	proto = tcp
