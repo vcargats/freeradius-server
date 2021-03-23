@@ -67,6 +67,10 @@ static void print_packet(RADIUS_PACKET *packet)
 #endif
 
 
+#ifdef WITH_COA_SINGLE_TUNNEL
+static int _reversed_listener_free(rad_listen_t *listener);
+#endif
+static void listen_prepare(rad_listen_t *listener, RAD_LISTEN_TYPE type);
 static rad_listen_t *listen_alloc(TALLOC_CTX *ctx, RAD_LISTEN_TYPE type);
 
 #ifdef WITH_COMMAND_SOCKET
@@ -734,6 +738,39 @@ static int dual_tcp_accept(rad_listen_t *listener)
 		}
 #endif
 	}
+
+#ifdef WITH_COA_SINGLE_TUNNEL
+	if(this->with_coa) {
+
+		this->main_listener = this;
+		this->reverse_listener = talloc_memdup(this, this, sizeof *this);
+		this->reverse_listener->main_listener = this;
+
+		talloc_set_destructor(this->reverse_listener, _reversed_listener_free);
+
+		listen_prepare(this->reverse_listener, RAD_LISTEN_PROXY);
+
+		/* recv always done on the original listener */
+		// to be implemented in later commit
+		//this->reverse_listener->send = dual_tls_send_req;
+
+		home_server_t *home = talloc_zero(this, home_server_t);
+		{
+			home->ipaddr = sock->other_ipaddr;
+			home->port = sock->other_port;
+			home->proto = sock->proto;
+			home->secret = sock->client->secret;
+
+			home->coa_irt = this->coa_irt;
+			home->coa_mrt = this->coa_mrt;
+			home->coa_mrc = this->coa_mrc;
+			home->coa_mrd = this->coa_mrd;
+			home->coa_server = this->reverse_listener->server;
+		}
+
+		sock->home = home;
+	}
+#endif
 
 	/*
 	 *	FIXME: set O_NONBLOCK on the accept'd fd.
@@ -2780,6 +2817,39 @@ static int _listener_free(rad_listen_t *this)
 	return 0;
 }
 
+#ifdef WITH_COA_SINGLE_TUNNEL
+static int _reversed_listener_free(rad_listen_t *this)
+{
+	rad_assert(this->main_listener != this);    /* check the lister is a reversed one */
+
+	rad_listen_t *listener_p = this->main_listener;
+
+	if(listener_p) {
+		/*
+		 * freeing reversed listener means we need
+		 * to free the main(parent) listener as well
+		 * */
+		listener_p->reverse_listener = NULL;
+		talloc_unlink(listener_p, this);
+		talloc_free(listener_p);
+	}
+
+	return 0;
+}
+#endif
+
+/*
+ *	Initialize a new listener.
+ */
+static void listen_prepare(rad_listen_t* listener, RAD_LISTEN_TYPE type)
+{
+	listener->type = type;
+	listener->recv = master_listen[listener->type].recv;
+	listener->send = master_listen[listener->type].send;
+	listener->print = master_listen[listener->type].print;
+	listener->encode = master_listen[listener->type].encode;
+	listener->decode = master_listen[listener->type].decode;
+}
 
 /*
  *	Allocate & initialize a new listener.
@@ -2790,12 +2860,7 @@ static rad_listen_t *listen_alloc(TALLOC_CTX *ctx, RAD_LISTEN_TYPE type)
 
 	this = talloc_zero(ctx, rad_listen_t);
 
-	this->type = type;
-	this->recv = master_listen[this->type].recv;
-	this->send = master_listen[this->type].send;
-	this->print = master_listen[this->type].print;
-	this->encode = master_listen[this->type].encode;
-	this->decode = master_listen[this->type].decode;
+	listen_prepare(this, type);
 
 	talloc_set_destructor(this, _listener_free);
 
@@ -2894,9 +2959,41 @@ rad_listen_t *proxy_new_listener(TALLOC_CTX *ctx, home_server_t *home, uint16_t 
 
 		this->recv = proxy_tls_recv;
 		this->send = proxy_tls_send;
+
+#   ifdef WITH_COA_SINGLE_TUNNEL
+		if(home->with_coa) {
+
+			this->with_coa = home->with_coa;
+
+			this->main_listener = this;
+			this->reverse_listener = talloc_memdup(this, this, sizeof *this);
+			talloc_set_destructor(this->reverse_listener, _reversed_listener_free);
+			this->reverse_listener->main_listener = this;
+
+			this->reverse_listener->nodup = true;
+
+			listen_prepare(this->reverse_listener, RAD_LISTEN_COA);
+
+			/* recv always done on the original listener */
+			// to be implemented in later commit
+			//this->reverse_listener->send = proxy_tls_send_reply;
+
+			RADCLIENT *client = talloc_zero(sock, RADCLIENT);
+			{
+				client->ipaddr = sock->other_ipaddr;
+				client->src_ipaddr = sock->my_ipaddr;
+				client->longname = client->shortname = talloc_typed_strdup(client, home->name);
+				client->secret = talloc_typed_strdup(client, home->secret);
+				client->nas_type = "none";
+				client->server = talloc_typed_strdup(client, home->coa_server);
+			}
+
+			sock->client = client;
+		}
+#   endif
 	}
-#endif
-#endif
+#endif	/* WITH_TLS */
+#endif	/* WITH_TCP */
 	/*
 	 *	Figure out which port we were bound to.
 	 */
@@ -3107,9 +3204,11 @@ static rad_listen_t *listen_parse(CONF_SECTION *cs, char const *server)
 #   ifdef WITH_COA_SINGLE_TUNNEL
 		if (strchr(plus_loc + 1, '+') != NULL) {
 			this->with_coa = true;
+			this->main_listener = this;
 		} else if (strcmp(plus_loc + 1, "coa") == 0) {
 			this->dual = false;
 			this->with_coa = true;
+			this->main_listener = this;
 		}
 #   endif
 	}
