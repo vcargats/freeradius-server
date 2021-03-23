@@ -73,6 +73,13 @@ struct rad_listen {
 	bool		dual;
 	rbtree_t	*children;
 	rad_listen_t	*parent;
+#   ifdef WITH_COA_SINGLE_TUNNEL
+	bool		with_coa;
+	uint32_t	coa_irt;
+	uint32_t	coa_mrc;
+	uint32_t	coa_mrt;
+	uint32_t	coa_mrd;
+#   endif /* WITH_COA_SINGLE_TUNNEL */
 #endif
 	bool		nodup;
 	bool		synchronous;
