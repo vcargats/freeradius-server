@@ -61,7 +61,7 @@ listen {
 	#  Allowed values are:
 	#	auth	listen for authentication packets
 	#	acct	listen for accounting packets
-	#       auth+acct listen for both authentication and accounting packets
+	#	auth+acct listen for both authentication and accounting packets
 	#	proxy   IP to use for sending proxied packets
 	#	detail  Read from the detail file.  For examples, see
 	#               raddb/sites-available/copy-acct-to-home-server
@@ -463,9 +463,12 @@ authorize {
 	#  through the following section, and ONLY the following section.
 	#  This permits you to do DB queries, for example.  If the modules
 	#  listed here return "fail", then NO response is sent.
+	#  For auth+coa and auth+acct+coa listeners we may set up TCP-Session-Key.
 	#
 #	Autz-Type Status-Server {
-#
+#		update control {
+#			TCP-Session-Key := &Operator-NAS-Identifier
+#		}
 #	}
 }
 
