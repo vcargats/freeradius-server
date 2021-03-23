@@ -797,6 +797,12 @@ int common_socket_print(rad_listen_t const *this, char *buffer, size_t bufsize)
 	}
 #endif
 
+#ifdef WITH_COA_SINGLE_TUNNEL
+	if(this->with_coa) {
+		ADDSTRING("+coa");
+	}
+#endif
+
 	if (sock->interface) {
 		ADDSTRING(" interface ");
 		ADDSTRING(sock->interface);
@@ -932,6 +938,16 @@ static CONF_PARSER limit_config[] = {
 	CONF_PARSER_TERMINATOR
 };
 
+#ifdef WITH_COA_SINGLE_TUNNEL
+static CONF_PARSER coa_config[] = {
+	{ "irt",  FR_CONF_OFFSET(PW_TYPE_INTEGER, rad_listen_t, coa_irt), STRINGIFY(2) },
+	{ "mrt",  FR_CONF_OFFSET(PW_TYPE_INTEGER, rad_listen_t, coa_mrt), STRINGIFY(16) },
+	{ "mrc",  FR_CONF_OFFSET(PW_TYPE_INTEGER, rad_listen_t, coa_mrc), STRINGIFY(5) },
+	{ "mrd",  FR_CONF_OFFSET(PW_TYPE_INTEGER, rad_listen_t, coa_mrd), STRINGIFY(30) },
+	CONF_PARSER_TERMINATOR
+};
+#endif
+
 
 #ifdef WITH_TCP
 /*
@@ -955,11 +971,11 @@ static int listener_unlink(UNUSED void *ctx, UNUSED void *data)
 {
 	return 2;		/* unlink this node from the tree */
 }
-#endif
+#endif /* WITH_TCP */
 
 
 /*
- *	Parse an authentication or accounting socket.
+ *	Parse an status/proxy/auth/acct/coa sockets.
  */
 int common_socket_parse(CONF_SECTION *cs, rad_listen_t *this)
 {
@@ -2924,9 +2940,15 @@ static const FR_NAME_NUMBER listen_compare[] = {
 	{ "status",	RAD_LISTEN_NONE },
 #endif
 	{ "auth",	RAD_LISTEN_AUTH },
+#ifdef WITH_COA_SINGLE_TUNNEL
+	{ "auth+coa",	RAD_LISTEN_AUTH },
+#endif
 #ifdef WITH_ACCOUNTING
-	{ "acct",	RAD_LISTEN_ACCT },
-	{ "auth+acct",	RAD_LISTEN_AUTH },
+	{ "acct",	        RAD_LISTEN_ACCT },
+	{ "auth+acct",	        RAD_LISTEN_AUTH },
+#   ifdef WITH_COA_SINGLE_TUNNEL
+	{ "auth+acct+coa",	RAD_LISTEN_AUTH },
+#   endif
 #endif
 #ifdef WITH_DETAIL
 	{ "detail",	RAD_LISTEN_DETAIL },
@@ -2964,6 +2986,9 @@ static rad_listen_t *listen_parse(CONF_SECTION *cs, char const *server)
 	char const	*value;
 	fr_dlhandle	handle;
 	CONF_SECTION	*server_cs;
+#ifdef WITH_COA_SINGLE_TUNNEL
+	CONF_SECTION	*coa;
+#endif
 	char		buffer[32];
 
 	cp = cf_pair_find(cs, "type");
@@ -3074,10 +3099,19 @@ static rad_listen_t *listen_parse(CONF_SECTION *cs, char const *server)
 
 #ifdef WITH_TCP
 	/*
-	 *	Special-case '+' for "auth+acct".
+	 *	Special-case '+' for "auth+acct" and "auth+coa"/"auth+acct+coa"
 	 */
-	if (strchr(listen_type, '+') != NULL) {
+	char *plus_loc = NULL;
+	if ((plus_loc = strchr(listen_type, '+')) != NULL) {
 		this->dual = true;
+#   ifdef WITH_COA_SINGLE_TUNNEL
+		if (strchr(plus_loc + 1, '+') != NULL) {
+			this->with_coa = true;
+		} else if (strcmp(plus_loc + 1, "coa") == 0) {
+			this->dual = false;
+			this->with_coa = true;
+		}
+#   endif
 	}
 #endif
 
@@ -3096,6 +3130,42 @@ static rad_listen_t *listen_parse(CONF_SECTION *cs, char const *server)
 		listen_free(&this);
 		return NULL;
 	}
+
+#ifdef WITH_COA_SINGLE_TUNNEL
+	if(this->with_coa && !this->tls) {
+		cf_log_err_cs(cs, "Type \"+coa\" is available for TLS transport only");
+		listen_free(&this);
+		return NULL;
+	}
+
+	coa = cf_section_sub_find(cs, "coa");
+	if (coa) {
+		if(!this->with_coa) {
+			cf_log_err_cs(cs, "Invalid section \"coa\" for this listener type");
+			listen_free(&this);
+			return NULL;
+		}
+
+		rcode = cf_section_parse(cs, this, coa_config);
+		if (rcode < 0) {
+			listen_free(&this);
+			return NULL;
+		}
+
+		/*
+		 * Same boundary checks as for home server
+		 */
+		FR_INTEGER_BOUND_CHECK("coa_irt", this->coa_irt, >=, 1);
+		FR_INTEGER_BOUND_CHECK("coa_irt", this->coa_irt, <=, 5);
+
+		FR_INTEGER_BOUND_CHECK("coa_mrc", this->coa_mrc, <=, 20);
+
+		FR_INTEGER_BOUND_CHECK("coa_mrt", this->coa_mrt, <=, 30);
+
+		FR_INTEGER_BOUND_CHECK("coa_mrd", this->coa_mrd, >=, 5);
+		FR_INTEGER_BOUND_CHECK("coa_mrd", this->coa_mrd, <=, 60);
+	}
+#endif	/* WITH_COA_SINGLE_TUNNEL */
 
 	cf_log_info(cs, "}");
 
