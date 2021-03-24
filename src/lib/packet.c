@@ -697,6 +697,14 @@ bool fr_packet_list_id_alloc(fr_packet_list_t *pl, int proto,
 		 */
 		if (ps->num_outgoing == 256) continue;
 
+#ifdef WITH_COA_SINGLE_TUNNEL
+		if(pctx && *pctx) {
+			if(ps->ctx == *pctx) goto skip_search;
+
+			continue;
+		}
+#endif
+
 #ifdef WITH_TCP
 		if (ps->proto != proto) continue;
 #endif
@@ -760,6 +768,9 @@ bool fr_packet_list_id_alloc(fr_packet_list_t *pl, int proto,
 		 *	Otherwise, this socket is OK to use.
 		 */
 
+#ifdef WITH_COA_SINGLE_TUNNEL
+skip_search:
+#endif
 		/*
 		 *	Look for a free Id, starting from a random number.
 		 */
