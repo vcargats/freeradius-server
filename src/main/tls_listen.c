@@ -77,6 +77,12 @@ static void tls_socket_close(rad_listen_t *listener)
 
 	listener->status = RAD_LISTEN_STATUS_EOL;
 	listener->tls = NULL; /* parent owns this! */
+#ifdef WITH_COA_SINGLE_TUNNEL
+	if(listener->with_coa && listener->reverse_listener) {
+		listener->reverse_listener->status = RAD_LISTEN_STATUS_EOL;
+		listener->reverse_listener->tls = NULL;
+	}
+#endif
 
 	/*
 	 *	Tell the event handler that an FD has disappeared.

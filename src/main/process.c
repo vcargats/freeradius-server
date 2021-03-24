@@ -2086,10 +2086,15 @@ static void tcp_socket_timer(void *ctx)
 			 *	open to listen for replies to requests we had
 			 *	previously sent.
 			 */
-			if (listener->type == RAD_LISTEN_PROXY) {
+			if (listener->type == RAD_LISTEN_PROXY
+#ifdef WITH_COA_SINGLE_TUNNEL
+			    || (listener->with_coa && listener->reverse_listener)
+#endif
+			    )
+			{
 				PTHREAD_MUTEX_LOCK(&proxy_mutex);
 				if (!fr_packet_list_socket_freeze(proxy_list,
-								  listener->fd)) {
+								  listener->fd)) { /* reversed listener got same fd */
 					ERROR("Fatal error freezing socket: %s", fr_strerror());
 					fr_exit(1);
 				}
@@ -2101,6 +2106,11 @@ static void tcp_socket_timer(void *ctx)
 			 *	Mark the socket as "don't use if at all possible".
 			 */
 			listener->status = RAD_LISTEN_STATUS_FROZEN;
+#ifdef WITH_COA_SINGLE_TUNNEL
+			if(listener->with_coa && listener->reverse_listener) {
+				listener->reverse_listener->status = RAD_LISTEN_STATUS_FROZEN;
+			}
+#endif
 			event_new_fd(listener);
 			return;
 		}
@@ -5220,8 +5230,25 @@ static int proxy_eol_cb(void *ctx, void *data)
 static void event_new_fd(rad_listen_t *this)
 {
 	char buffer[1024];
+	rad_listen_t *proxy_listener = this;
 
 	ASSERT_MASTER;
+
+#ifdef WITH_COA_SINGLE_TUNNEL
+	/*
+	 * Below we are clearing the outstanding request. Requests may be
+	 * incomig or outgoing and the clear procedures are different.
+	 * This function might be called either w/ direct or 'reversed' listener,
+	 * so we normalize it first.
+	 */
+
+	if(this->with_coa) {
+		this = this->main_listener;
+		proxy_listener = this->reverse_listener;
+		rad_assert(this->reverse_listener ?
+		    this->status == this->reverse_listener->status : true);
+	}
+#endif
 
 	if (this->status == RAD_LISTEN_STATUS_KNOWN) return;
 
@@ -5277,6 +5304,8 @@ static void event_new_fd(rad_listen_t *this)
 		 *	Add it to the list of sockets we can use.
 		 *	Server sockets (i.e. auth/acct) are never
 		 *	added to the packet list.
+		 *	auth/acct + coa (with_coa == true) are
+		 *	handled in 'default' case
 		 */
 		case RAD_LISTEN_PROXY:
 #ifdef WITH_TCP
@@ -5354,11 +5383,21 @@ static void event_new_fd(rad_listen_t *this)
 		if (fr_event_fd_insert(el, 0, this->fd,
 				       event_socket_handler, this)) {
 			this->status = RAD_LISTEN_STATUS_KNOWN;
+#ifdef WITH_COA_SINGLE_TUNNEL
+			if(this->with_coa && this->reverse_listener) {
+				this->reverse_listener->status = RAD_LISTEN_STATUS_KNOWN;
+			}
+#endif
 			return;
 		}
 
 		ERROR("Failed adding event handler for socket: %s", fr_strerror());
 		this->status = RAD_LISTEN_STATUS_REMOVE_NOW;
+#ifdef WITH_COA_SINGLE_TUNNEL
+		if(this->with_coa && this->reverse_listener) {
+			this->reverse_listener->status = RAD_LISTEN_STATUS_REMOVE_NOW;
+		}
+#endif
 	} /* end of INIT */
 
 #ifdef WITH_TCP
@@ -5370,7 +5409,11 @@ static void event_new_fd(rad_listen_t *this)
 		 *	Requests are still using the socket.  Wait for
 		 *	them to finish.
 		 */
-		if (this->count > 0) {
+		if (this->count > 0
+#ifdef WITH_COA_SINGLE_TUNNEL
+		    || proxy_listener->count > 0
+#endif
+		    ) {
 			struct timeval when;
 			listen_socket_t *sock = this->data;
 
@@ -5393,6 +5436,11 @@ static void event_new_fd(rad_listen_t *this)
 
 		fr_event_fd_delete(el, 0, this->fd);
 		this->status = RAD_LISTEN_STATUS_REMOVE_NOW;
+#ifdef WITH_COA_SINGLE_TUNNEL
+		if(this->with_coa && this->reverse_listener) {
+			this->reverse_listener->status = RAD_LISTEN_STATUS_REMOVE_NOW;
+		}
+#endif
 	}
 
 	/*
@@ -5408,16 +5456,21 @@ static void event_new_fd(rad_listen_t *this)
 		/*
 		 *	Tell all requests using this socket that the socket is dead.
 		 */
-		if (this->type == RAD_LISTEN_PROXY) {
+		if (this->type == RAD_LISTEN_PROXY
+#ifdef  WITH_COA_SINGLE_TUNNEL
+			|| (this->with_coa && this->reverse_listener)
+#endif
+		    )
+                {
 			PTHREAD_MUTEX_LOCK(&proxy_mutex);
 			if (!fr_packet_list_socket_freeze(proxy_list,
-							  this->fd)) {
+							  proxy_listener->fd)) {
 				ERROR("Fatal error freezing socket: %s", fr_strerror());
 				fr_exit(1);
 			}
 
-			if (this->count > 0) {
-				fr_packet_list_walk(proxy_list, this, proxy_eol_cb);
+			if (proxy_listener->count > 0) {
+				fr_packet_list_walk(proxy_list, proxy_listener, proxy_eol_cb);
 			}
 			PTHREAD_MUTEX_UNLOCK(&proxy_mutex);
 		}
@@ -5427,7 +5480,11 @@ static void event_new_fd(rad_listen_t *this)
 		 *	Requests are still using the socket.  Wait for
 		 *	them to finish.
 		 */
-		if (this->count > 0) {
+		if (this->count > 0
+#ifdef WITH_COA_SINGLE_TUNNEL
+		    || proxy_listener->count > 0
+#endif
+		    ) {
 			struct timeval when;
 			listen_socket_t *sock = this->data;
 
@@ -5452,6 +5509,11 @@ static void event_new_fd(rad_listen_t *this)
 		 *	No one is using the socket.  We can remove it now.
 		 */
 		this->status = RAD_LISTEN_STATUS_REMOVE_NOW;
+#ifdef WITH_COA_SINGLE_TUNNEL
+		if(this->with_coa && this->reverse_listener) {
+			this->reverse_listener->status = RAD_LISTEN_STATUS_REMOVE_NOW;
+		}
+#endif
 	} /* socket is at EOL */
 #endif	  /* WITH_TCP */
 
@@ -5513,17 +5575,25 @@ static void event_new_fd(rad_listen_t *this)
 				INFO(" ... shutting down socket %s (%u of %u)", buffer,
 				     home->limit.num_connections, home->limit.max_connections);
 			}
+		}
 
+		if (this->type == RAD_LISTEN_PROXY
+#ifdef	WITH_COA_SINGLE_TUNNEL
+			|| (this->with_coa && this->reverse_listener)
+#endif
+		   ) {
 			PTHREAD_MUTEX_LOCK(&proxy_mutex);
-			fr_packet_list_walk(proxy_list, this, eol_proxy_listener);
+			fr_packet_list_walk(proxy_list, proxy_listener, eol_proxy_listener);
 
-			if (!fr_packet_list_socket_del(proxy_list, this->fd)) {
+			if (!fr_packet_list_socket_del(proxy_list, proxy_listener->fd)) {
 				ERROR("Fatal error removing socket %s: %s",
 				      buffer, fr_strerror());
 				fr_exit(1);
 			}
 			PTHREAD_MUTEX_UNLOCK(&proxy_mutex);
-		} else
+		}
+
+		if(this->type != RAD_LISTEN_PROXY)
 #endif	/* WITH_PROXY */
 		{
 			INFO(" ... shutting down socket %s", buffer);
@@ -6154,6 +6224,8 @@ void radius_event_free(void)
 
 	if (proxy_ctx) talloc_free(proxy_ctx);
 #endif
+
+	listen_destroy();
 
 	TALLOC_FREE(el);
 
