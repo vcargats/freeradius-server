@@ -795,8 +795,7 @@ static int dual_tcp_accept(rad_listen_t *listener)
 		listen_prepare(this->reverse_listener, RAD_LISTEN_PROXY);
 
 		/* recv always done on the original listener */
-		// to be implemented in later commit
-		//this->reverse_listener->send = dual_tls_send_req;
+		this->reverse_listener->send = dual_tls_send_req;
 		listener_store_byaddr(this, &sock->other_ipaddr);
 
 		home_server_t *home = talloc_zero(this, home_server_t);
@@ -3070,8 +3069,7 @@ rad_listen_t *proxy_new_listener(TALLOC_CTX *ctx, home_server_t *home, uint16_t 
 			listen_prepare(this->reverse_listener, RAD_LISTEN_COA);
 
 			/* recv always done on the original listener */
-			// to be implemented in later commit
-			//this->reverse_listener->send = proxy_tls_send_reply;
+			this->reverse_listener->send = proxy_tls_send_reply;
 
 			RADCLIENT *client = talloc_zero(sock, RADCLIENT);
 			{
