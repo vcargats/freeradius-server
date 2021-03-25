@@ -55,14 +55,24 @@ char const *radiusd_version = "FreeRADIUS Version " RADIUSD_VERSION_STRING
 ;
 
 /*
- *	Static functions.
+ *	Stub functions.
  */
-static void usage(int);
-
 void listen_free(UNUSED rad_listen_t **head)
 {
 	/* do nothing */
 }
+
+#ifdef WITH_COA_SINGLE_TUNNEL
+void listener_store_bykey(UNUSED rad_listen_t *listener, UNUSED char const *key)
+{
+	/* do nothing */
+}
+#endif
+
+/*
+ *	Static functions.
+ */
+static void usage(int);
 
 
 static rad_listen_t *listen_alloc(void *ctx)
