@@ -411,7 +411,7 @@ int rad_status_server(REQUEST *request)
 				char const *key = vp->vp_strvalue;
 				/* do not overwrite */
 				if(!request->listener->key) {
-					RWDEBUG2("Set current tunnel by key: %s", key);
+					RDEBUG2("Set current tunnel by key %s", key);
 					listener_store_bykey(request->listener, key);
 				}
 			}
@@ -786,9 +786,9 @@ static int dual_tcp_accept(rad_listen_t *listener)
 #ifdef WITH_COA_SINGLE_TUNNEL
 	if(this->with_coa) {
 
-		this->main_listener = this;
 		this->reverse_listener = talloc_memdup(this, this, sizeof *this);
-		this->reverse_listener->main_listener = this;
+		this->reverse_listener->reversed = true;
+		this->reverse_listener->reverse_listener = this;
 
 		talloc_set_destructor(this->reverse_listener, _reversed_listener_free);
 
@@ -2914,9 +2914,9 @@ static int _listener_free(rad_listen_t *this)
 #ifdef WITH_COA_SINGLE_TUNNEL
 static int _reversed_listener_free(rad_listen_t *this)
 {
-	rad_assert(this->main_listener != this);    /* check the lister is a reversed one */
+	rad_assert(this->reversed);    /* check the lister is a reversed one */
 
-	rad_listen_t *listener_p = this->main_listener;
+	rad_listen_t *listener_p = this->reverse_listener;
 
 	if(listener_p) {
 		/*
@@ -3059,10 +3059,10 @@ rad_listen_t *proxy_new_listener(TALLOC_CTX *ctx, home_server_t *home, uint16_t 
 
 			this->with_coa = home->with_coa;
 
-			this->main_listener = this;
 			this->reverse_listener = talloc_memdup(this, this, sizeof *this);
 			talloc_set_destructor(this->reverse_listener, _reversed_listener_free);
-			this->reverse_listener->main_listener = this;
+			this->reverse_listener->reversed = true;
+			this->reverse_listener->reverse_listener = this;
 
 			this->reverse_listener->nodup = true;
 
@@ -3297,11 +3297,9 @@ static rad_listen_t *listen_parse(CONF_SECTION *cs, char const *server)
 #   ifdef WITH_COA_SINGLE_TUNNEL
 		if (strchr(plus_loc + 1, '+') != NULL) {
 			this->with_coa = true;
-			this->main_listener = this;
 		} else if (strcmp(plus_loc + 1, "coa") == 0) {
 			this->dual = false;
 			this->with_coa = true;
-			this->main_listener = this;
 		}
 #   endif
 	}

@@ -75,6 +75,7 @@ struct rad_listen {
 	rad_listen_t	*parent;
 #   ifdef WITH_COA_SINGLE_TUNNEL
 	bool		with_coa;
+	bool		reversed;
 	char const	*key;	/* TCP-Session-Key */
 
 	/*
@@ -85,11 +86,6 @@ struct rad_listen {
 	 * is used to send CoA-ACK/NAK and Disconnect-ACK/NAK.
 	 */
 	rad_listen_t	*reverse_listener;
-	/*
-	 * For the reverse_listener main_listener is equal to the original
-	 * (parent) listener we reversed from.
-	 */
-	rad_listen_t	*main_listener;
 
 	uint32_t	coa_irt;
 	uint32_t	coa_mrc;

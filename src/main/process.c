@@ -4412,7 +4412,7 @@ static void request_coa_originate(REQUEST *request)
 			 * 2. By explicitly defined key
 			 */
 			if(send_listener) {
-				RWDEBUG2("Found tunnel by address %s:%d",
+				RDEBUG2("Found tunnel by address %s:%d",
 				    inet_ntop(ipaddr.af, &ipaddr.ipaddr, buffer, sizeof(buffer)), port);
 				goto reverse;
 			} else {
@@ -4424,10 +4424,10 @@ static void request_coa_originate(REQUEST *request)
 			}
 
 			if(send_listener) {
-				RWDEBUG2("Found tunnel by key %s", key);
+				RDEBUG2("Found tunnel by key %s", key);
 				goto reverse;
 			} else if(request->listener->with_coa) {
-				RWDEBUG2("Found tunnel by itself");
+				RDEBUG2("Found tunnel by itself");
 				send_listener = request->listener;
 				listcount = 1; /* there is no other listener to try with */
 			}
@@ -4556,7 +4556,15 @@ static void request_coa_originate(REQUEST *request)
 		 * case the same listener will be returned if some other thread
 		 * searches by same IP or key. I hope that is ok.
 		 */
-		if(send_listener && --listcount) goto try_next;
+		if(send_listener && --listcount) {
+			/*
+			 * TODO: should run virtual server fail
+			 * section here ?
+			 */
+			send_listener = NULL;
+			coa->packet->vps = NULL;
+			goto try_next;
+		}
 #endif
 		radlog_request(L_PROXY, 0, coa, "Failed to insert CoA request into proxy list");
 		goto fail;
@@ -5241,12 +5249,14 @@ static void event_new_fd(rad_listen_t *this)
 	 * This function might be called either w/ direct or 'reversed' listener,
 	 * so we normalize it first.
 	 */
-
-	if(this->with_coa) {
-		this = this->main_listener;
-		proxy_listener = this->reverse_listener;
-		rad_assert(this->reverse_listener ?
-		    this->status == this->reverse_listener->status : true);
+	if(this->with_coa && this->reverse_listener) {
+		if(this->reversed) {
+			proxy_listener = this;
+			this = this->reverse_listener;
+		} else {
+			proxy_listener = this->reverse_listener;
+		}
+		rad_assert(this->status == proxy_listener->status);
 	}
 #endif
 

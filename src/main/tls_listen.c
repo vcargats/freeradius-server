@@ -99,7 +99,7 @@ static void tls_socket_close(rad_listen_t *listener)
 	 */
 }
 
-static int CC_HINT(nonnull) tls_socket_write(rad_listen_t *listener, REQUEST *request)
+static int CC_HINT(nonnull) tls_socket_write(rad_listen_t *listener, REQUEST* request, int sockfd)
 {
 	uint8_t *p;
 	ssize_t rcode;
@@ -108,8 +108,8 @@ static int CC_HINT(nonnull) tls_socket_write(rad_listen_t *listener, REQUEST *re
 	p = sock->ssn->dirty_out.data;
 
 	while (p < (sock->ssn->dirty_out.data + sock->ssn->dirty_out.used)) {
-		RDEBUG3("Writing to socket %d", request->packet->sockfd);
-		rcode = write(request->packet->sockfd, p,
+		RDEBUG3("Writing to socket %d", sockfd);
+		rcode = write(sockfd, p,
 			      (sock->ssn->dirty_out.data + sock->ssn->dirty_out.used) - p);
 		if (rcode <= 0) {
 			RDEBUG("Error writing to TLS socket: %s", fr_syserror(errno));
@@ -253,7 +253,7 @@ static int tls_socket_recv(rad_listen_t *listener)
 		 *	More ACK data to send.  Do so.
 		 */
 		if (sock->ssn->dirty_out.used > 0) {
-			tls_socket_write(listener, request);
+			tls_socket_write(listener, request, request->packet->sockfd);
 			PTHREAD_MUTEX_UNLOCK(&sock->mutex);
 			return 0;
 		}
@@ -549,7 +549,7 @@ int dual_tls_send(rad_listen_t *listener, REQUEST *request)
 	if (sock->ssn->dirty_out.used > 0) {
 		dump_hex("WRITE TO SSL", sock->ssn->dirty_out.data, sock->ssn->dirty_out.used);
 
-		tls_socket_write(listener, request);
+		tls_socket_write(listener, request, request->packet->sockfd);
 	}
 	PTHREAD_MUTEX_UNLOCK(&sock->mutex);
 
@@ -596,7 +596,7 @@ int dual_tls_send_req(rad_listen_t *listener, REQUEST *request)
 	if (sock->ssn->dirty_out.used > 0) {
 		dump_hex("WRITE TO SSL", sock->ssn->dirty_out.data, sock->ssn->dirty_out.used);
 
-		tls_socket_write(listener, request);
+		tls_socket_write(listener, request, request->proxy->sockfd);
 	}
 	PTHREAD_MUTEX_UNLOCK(&sock->mutex);
 

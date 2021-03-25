@@ -839,7 +839,12 @@ home_server_t *home_server_afrom_cs(TALLOC_CTX *ctx, realm_config_t *rc, CONF_SE
 			}
 
 			if (((home->type == HOME_TYPE_AUTH) ||
-			     (home->type == HOME_TYPE_AUTH_ACCT)) && !home->ping_user_password) {
+			     (home->type == HOME_TYPE_AUTH_ACCT)
+#ifdef WITH_COA_SINGLE_TUNNEL
+			     || (home->type == HOME_TYPE_AUTH_COA)
+			     || (home->type == HOME_TYPE_AUTH_ACCT_COA)
+#endif
+			     ) && !home->ping_user_password) {
 				cf_log_err_cs(cs, "You must supply a 'password' to enable status_check=request");
 				goto error;
 			}
@@ -899,6 +904,13 @@ home_server_t *home_server_afrom_cs(TALLOC_CTX *ctx, realm_config_t *rc, CONF_SE
 #ifndef WITH_TLS
 	if (tls) {
 		cf_log_err_cs(cs, "TLS transport is not available in this executable");
+		goto error;
+	}
+#endif
+
+#ifdef WITH_COA_SINGLE_TUNNEL
+	if(!tls && home->with_coa) {
+		cf_log_err_cs(cs, "Cannot accept CoA from auth tunnel with no TLS");
 		goto error;
 	}
 #endif

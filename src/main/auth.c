@@ -602,7 +602,7 @@ authenticate:
 		char const *key = tmp->vp_strvalue;
 		/* do not overwrite */
 		if(!request->listener->key) {
-			RWDEBUG2("Set current tunnel by key: %s", key);
+			RDEBUG2("Set current tunnel with key %s", key);
 			listener_store_bykey(request->listener, key);
 		}
 	}
