@@ -3904,7 +3904,7 @@ static void listener_remove_fromtree(
 	void* rbnode;
 	radlisten_list_t *list;
 
-	radlisten_node_t *prev = NULL, *it, *head;
+	radlisten_node_t *prev = NULL, *it;
 
 	radlisten_node_t mynode = { NULL, listener };
 	radlisten_list_t mylisteners = { &mynode, NULL, NULL, 1 /* num */ };
@@ -3916,7 +3916,7 @@ static void listener_remove_fromtree(
 
 	if(!list) goto out; /* key may not exist yet */
 
-	head = it = list->head;
+	it = list->head;
 
 	while(it && it->listener != listener) {
 	    prev = it, it = it->next;

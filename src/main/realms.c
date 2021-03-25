@@ -804,8 +804,11 @@ home_server_t *home_server_afrom_cs(TALLOC_CTX *ctx, realm_config_t *rc, CONF_SE
 #   ifdef WITH_COA_SINGLE_TUNNEL
  		case HOME_TYPE_AUTH_ACCT_COA:
 			home->dual = true;
+			home->with_coa = true;
+			break;
  		case HOME_TYPE_AUTH_COA:
 			home->with_coa = true;
+			break;
 #   endif
  		case HOME_TYPE_COA:
 			if (home->server != NULL) {
