@@ -40,6 +40,8 @@ raddb:
 	${Q}echo '	filename = $${radacctdir}/detail_coa' >> $(TEST_PATH)/raddb/mods-enabled/detail
 	${Q}echo '}' >> $(TEST_PATH)/raddb/mods-enabled/detail
 
+	${Q}$(MAKE) -C $(TEST_PATH)/raddb/certs
+
 dictionary:
 	${Q}echo "# test dictionary not install.  Delete at any time." > $(TEST_PATH)/dictionary
 	${Q}echo '$$INCLUDE ' $(top_builddir)/share/dictionary >> $(TEST_PATH)/dictionary
