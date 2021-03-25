@@ -347,6 +347,13 @@ void version_init_features(CONF_SECTION *cs)
 #endif
 				);
 
+	version_add_feature(cs, "coa-single-tunnel",
+#ifdef WITH_COA_SINGLE_TUNNEL
+				true
+#else
+				false
+#endif
+				);
 
 	version_add_feature(cs, "control-socket",
 #ifdef WITH_COMMAND_SOCKET
