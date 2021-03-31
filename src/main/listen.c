@@ -98,9 +98,7 @@ static void print_packet(RADIUS_PACKET *packet)
 static void radlisten_list_free(void *list);
 static void listener_forget(rad_listen_t *listener);
 static void listener_store_byaddr(rad_listen_t *listener, fr_ipaddr_t const *ipaddr);
-static int _reversed_listener_free(rad_listen_t *listener);
 #endif
-static void listen_prepare(rad_listen_t *listener, RAD_LISTEN_TYPE type);
 static rad_listen_t *listen_alloc(TALLOC_CTX *ctx, RAD_LISTEN_TYPE type);
 
 #ifdef WITH_COMMAND_SOCKET
@@ -786,16 +784,10 @@ static int dual_tcp_accept(rad_listen_t *listener)
 #ifdef WITH_COA_SINGLE_TUNNEL
 	if(this->with_coa) {
 
-		this->reverse_listener = talloc_memdup(this, this, sizeof *this);
-		this->reverse_listener->reversed = true;
-		this->reverse_listener->reverse_listener = this;
+		this->send_proxy = dual_tls_send_req;
+		this->encode_proxy = master_listen[RAD_LISTEN_PROXY].encode;
+		this->decode_proxy = master_listen[RAD_LISTEN_PROXY].decode;
 
-		talloc_set_destructor(this->reverse_listener, _reversed_listener_free);
-
-		listen_prepare(this->reverse_listener, RAD_LISTEN_PROXY);
-
-		/* recv always done on the original listener */
-		this->reverse_listener->send = dual_tls_send_req;
 		listener_store_byaddr(this, &sock->other_ipaddr);
 
 		home_server_t *home = talloc_zero(this, home_server_t);
@@ -809,7 +801,7 @@ static int dual_tcp_accept(rad_listen_t *listener)
 			home->coa_mrt = this->coa_mrt;
 			home->coa_mrc = this->coa_mrc;
 			home->coa_mrd = this->coa_mrd;
-			home->coa_server = this->reverse_listener->server;
+			home->coa_server = this->server;
 		}
 
 		sock->home = home;
@@ -1547,7 +1539,7 @@ static int acct_socket_send(rad_listen_t *listener, REQUEST *request)
 static int proxy_socket_send(rad_listen_t *listener, REQUEST *request)
 {
 	rad_assert(request->proxy_listener == listener);
-	rad_assert(listener->send == proxy_socket_send);
+	rad_assert(listener->send_proxy == proxy_socket_send);
 
 	if (rad_send(request->proxy, NULL,
 		     request->home_server->secret) < 0) {
@@ -2911,40 +2903,6 @@ static int _listener_free(rad_listen_t *this)
 	return 0;
 }
 
-#ifdef WITH_COA_SINGLE_TUNNEL
-static int _reversed_listener_free(rad_listen_t *this)
-{
-	rad_assert(this->reversed);    /* check the lister is a reversed one */
-
-	rad_listen_t *listener_p = this->reverse_listener;
-
-	if(listener_p) {
-		/*
-		 * freeing reversed listener means we need
-		 * to free the main(parent) listener as well
-		 * */
-		listener_p->reverse_listener = NULL;
-		talloc_unlink(listener_p, this);
-		talloc_free(listener_p);
-	}
-
-	return 0;
-}
-#endif
-
-/*
- *	Initialize a new listener.
- */
-static void listen_prepare(rad_listen_t* listener, RAD_LISTEN_TYPE type)
-{
-	listener->type = type;
-	listener->recv = master_listen[listener->type].recv;
-	listener->send = master_listen[listener->type].send;
-	listener->print = master_listen[listener->type].print;
-	listener->encode = master_listen[listener->type].encode;
-	listener->decode = master_listen[listener->type].decode;
-}
-
 /*
  *	Allocate & initialize a new listener.
  */
@@ -2954,7 +2912,19 @@ static rad_listen_t *listen_alloc(TALLOC_CTX *ctx, RAD_LISTEN_TYPE type)
 
 	this = talloc_zero(ctx, rad_listen_t);
 
-	listen_prepare(this, type);
+	this->type = type;
+	this->recv = master_listen[this->type].recv;
+	this->print = master_listen[this->type].print;
+
+	if(type == RAD_LISTEN_PROXY) {
+		this->send_proxy = master_listen[this->type].send;
+		this->encode_proxy = master_listen[this->type].encode;
+		this->decode_proxy = master_listen[this->type].decode;
+	} else {
+		this->send = master_listen[this->type].send;
+		this->encode = master_listen[this->type].encode;
+		this->decode = master_listen[this->type].decode;
+	}
 
 	talloc_set_destructor(this, _listener_free);
 
@@ -3052,24 +3022,16 @@ rad_listen_t *proxy_new_listener(TALLOC_CTX *ctx, home_server_t *home, uint16_t 
 		}
 
 		this->recv = proxy_tls_recv;
-		this->send = proxy_tls_send;
+		this->send_proxy = proxy_tls_send;
 
 #   ifdef WITH_COA_SINGLE_TUNNEL
 		if(home->with_coa) {
 
 			this->with_coa = home->with_coa;
 
-			this->reverse_listener = talloc_memdup(this, this, sizeof *this);
-			talloc_set_destructor(this->reverse_listener, _reversed_listener_free);
-			this->reverse_listener->reversed = true;
-			this->reverse_listener->reverse_listener = this;
-
-			this->reverse_listener->nodup = true;
-
-			listen_prepare(this->reverse_listener, RAD_LISTEN_COA);
-
-			/* recv always done on the original listener */
-			this->reverse_listener->send = proxy_tls_send_reply;
+			this->send = proxy_tls_send_reply;
+			this->encode = master_listen[RAD_LISTEN_AUTH].encode;
+			this->decode = master_listen[RAD_LISTEN_AUTH].decode;
 
 			RADCLIENT *client = talloc_zero(sock, RADCLIENT);
 			{
@@ -3942,7 +3904,7 @@ static void listener_remove_fromtree(
 		}
 
 	} else {
-		DEBUG("Cannot find listener in reverse list");
+		DEBUG("Cannot find listener in list");
 	}
 
 out:
@@ -3951,18 +3913,10 @@ out:
 
 static void listener_forget(rad_listen_t *listener)
 {
-	if(!listener->reverse_listener ||
-		listener->type == RAD_LISTEN_PROXY) return;
+	if(!listener->with_coa) return;
 
 	listener_remove_fromtree(tree_key, &tree_keymutex, listener);
 	listener_remove_fromtree(tree_addr, &tree_addrmutex, listener);
-
-	if(listener->reverse_listener) {
-		/*
-		* avoid cyclic reference in reverse_listener destructor
-		*/
-		listener->reverse_listener->reverse_listener = NULL;
-	}
 }
 
 static radlisten_node_t* radlisten_node_init(radlisten_list_t *list, rad_listen_t *listener)
@@ -3977,8 +3931,8 @@ static radlisten_node_t* radlisten_node_init(radlisten_list_t *list, rad_listen_
 static void listener_store_byaddr(rad_listen_t *listener, fr_ipaddr_t const *ipaddr)
 {
 	radlisten_list_t *list;
-	if(!listener->reverse_listener ||
-		listener->type == RAD_LISTEN_PROXY) return;
+
+	if(!listener->with_coa) return;
 
 	pthread_mutex_lock(&tree_addrmutex);
 
@@ -4004,8 +3958,8 @@ static void listener_store_byaddr(rad_listen_t *listener, fr_ipaddr_t const *ipa
 void listener_store_bykey(rad_listen_t *listener, const char *newkey)
 {
 	radlisten_list_t *list;
-	if(!listener->reverse_listener ||
-		listener->type == RAD_LISTEN_PROXY) return;
+
+	if(!listener->with_coa) return;
 
 	rad_assert(newkey);
 
