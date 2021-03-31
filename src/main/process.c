@@ -2088,13 +2088,13 @@ static void tcp_socket_timer(void *ctx)
 			 */
 			if (listener->type == RAD_LISTEN_PROXY
 #ifdef WITH_COA_SINGLE_TUNNEL
-			    || (listener->with_coa && listener->reverse_listener)
+			    || listener->with_coa
 #endif
 			    )
 			{
 				PTHREAD_MUTEX_LOCK(&proxy_mutex);
 				if (!fr_packet_list_socket_freeze(proxy_list,
-								  listener->fd)) { /* reversed listener got same fd */
+								  listener->fd)) {
 					ERROR("Fatal error freezing socket: %s", fr_strerror());
 					fr_exit(1);
 				}
@@ -2106,11 +2106,6 @@ static void tcp_socket_timer(void *ctx)
 			 *	Mark the socket as "don't use if at all possible".
 			 */
 			listener->status = RAD_LISTEN_STATUS_FROZEN;
-#ifdef WITH_COA_SINGLE_TUNNEL
-			if(listener->with_coa && listener->reverse_listener) {
-				listener->reverse_listener->status = RAD_LISTEN_STATUS_FROZEN;
-			}
-#endif
 			event_new_fd(listener);
 			return;
 		}
@@ -2503,7 +2498,7 @@ static int process_proxy_reply(REQUEST *request, RADIUS_PACKET *reply)
 		 *	Decode the packet if required.
 		 */
 		if (request->proxy_listener) {
-			rcode = request->proxy_listener->decode(request->proxy_listener, request);
+			rcode = request->proxy_listener->decode_proxy(request->proxy_listener, request);
 			debug_packet(request, reply, true);
 
 			/*
@@ -3477,7 +3472,7 @@ static int request_proxy(REQUEST *request)
 	/*
 	 *	Encode the packet before we do anything else.
 	 */
-	request->proxy_listener->encode(request->proxy_listener, request);
+	request->proxy_listener->encode_proxy(request->proxy_listener, request);
 	debug_packet(request, request->proxy, false);
 
 	/*
@@ -3497,7 +3492,7 @@ static int request_proxy(REQUEST *request)
 	/*
 	 *	And send the packet.
 	 */
-	request->proxy_listener->send(request->proxy_listener, request);
+	request->proxy_listener->send_proxy(request->proxy_listener, request);
 	return 1;
 }
 
@@ -3846,7 +3841,7 @@ static void ping_home_server(void *ctx)
 
 	rad_assert(request->proxy_listener != NULL);
 	debug_packet(request, request->proxy, false);
-	request->proxy_listener->send(request->proxy_listener,
+	request->proxy_listener->send_proxy(request->proxy_listener,
 				      request);
 
 	/*
@@ -4124,7 +4119,7 @@ static void proxy_wait_for_reply(REQUEST *request, int action)
 		home->last_packet_sent = now.tv_sec;
 		request->proxy->timestamp = now;
 		debug_packet(request, request->proxy, false);
-		request->proxy_listener->send(request->proxy_listener, request);
+		request->proxy_listener->send_proxy(request->proxy_listener, request);
 		break;
 
 	case FR_ACTION_TIMER:
@@ -4435,7 +4430,6 @@ static void request_coa_originate(REQUEST *request)
 			if(send_listener) {
 			reverse:
 				rad_assert(listcount > 0);
-				send_listener = send_listener->reverse_listener;
 				coa->home_server = ((listen_socket_t*)send_listener->data)->home;
 			}
 		}
@@ -4593,7 +4587,7 @@ static void request_coa_originate(REQUEST *request)
 	/*
 	 *	Encode the packet before we do anything else.
 	 */
-	coa->proxy_listener->encode(coa->proxy_listener, coa);
+	coa->proxy_listener->encode_proxy(coa->proxy_listener, coa);
 	debug_packet(coa, coa->proxy, false);
 
 #ifdef DEBUG_STATE_MACHINE
@@ -4618,7 +4612,7 @@ static void request_coa_originate(REQUEST *request)
 	/*
 	 *	And send the packet.
 	 */
-	coa->proxy_listener->send(coa->proxy_listener, coa);
+	coa->proxy_listener->send_proxy(coa->proxy_listener, coa);
 }
 
 
@@ -4762,7 +4756,7 @@ static void coa_retransmit(REQUEST *request)
 		request->proxy->dst_port,
 		request->proxy->id);
 
-	request->proxy_listener->send(request->proxy_listener,
+	request->proxy_listener->send_proxy(request->proxy_listener,
 				      request);
 }
 
@@ -5238,27 +5232,8 @@ static int proxy_eol_cb(void *ctx, void *data)
 static void event_new_fd(rad_listen_t *this)
 {
 	char buffer[1024];
-	rad_listen_t *proxy_listener = this;
 
 	ASSERT_MASTER;
-
-#ifdef WITH_COA_SINGLE_TUNNEL
-	/*
-	 * Below we are clearing the outstanding request. Requests may be
-	 * incomig or outgoing and the clear procedures are different.
-	 * This function might be called either w/ direct or 'reversed' listener,
-	 * so we normalize it first.
-	 */
-	if(this->with_coa && this->reverse_listener) {
-		if(this->reversed) {
-			proxy_listener = this;
-			this = this->reverse_listener;
-		} else {
-			proxy_listener = this->reverse_listener;
-		}
-		rad_assert(this->status == proxy_listener->status);
-	}
-#endif
 
 	if (this->status == RAD_LISTEN_STATUS_KNOWN) return;
 
@@ -5368,15 +5343,16 @@ static void event_new_fd(rad_listen_t *this)
 			/*
 			 * In order insert_into_proxy hash function to work we
 			 * need to make sure proxy listener socket is inserted
-			 * into proxy_list as soon as it is created
+			 * into proxy_list as soon as it is created.
+			 * We should do that for listeners that are accepted only,
+			 * not for the listener that accepts, hence check for parrent.
 			 */
-			if(this->with_coa && this->reverse_listener) {
-				rad_listen_t *reverse_listener = this->reverse_listener;
+			if(this->with_coa && this->parent) {
 				PTHREAD_MUTEX_LOCK(&proxy_mutex);
-				if(!fr_packet_list_socket_add(proxy_list, reverse_listener->fd,
+				if(!fr_packet_list_socket_add(proxy_list, this->fd,
 							      sock->proto,
 				    			      &sock->other_ipaddr, sock->other_port,
-				    			      reverse_listener)) {
+				    			      this)) {
 					ERROR("Failed adding proxy socket");
 					fr_exit_now(1);
 				}
@@ -5393,21 +5369,11 @@ static void event_new_fd(rad_listen_t *this)
 		if (fr_event_fd_insert(el, 0, this->fd,
 				       event_socket_handler, this)) {
 			this->status = RAD_LISTEN_STATUS_KNOWN;
-#ifdef WITH_COA_SINGLE_TUNNEL
-			if(this->with_coa && this->reverse_listener) {
-				this->reverse_listener->status = RAD_LISTEN_STATUS_KNOWN;
-			}
-#endif
 			return;
 		}
 
 		ERROR("Failed adding event handler for socket: %s", fr_strerror());
 		this->status = RAD_LISTEN_STATUS_REMOVE_NOW;
-#ifdef WITH_COA_SINGLE_TUNNEL
-		if(this->with_coa && this->reverse_listener) {
-			this->reverse_listener->status = RAD_LISTEN_STATUS_REMOVE_NOW;
-		}
-#endif
 	} /* end of INIT */
 
 #ifdef WITH_TCP
@@ -5419,11 +5385,7 @@ static void event_new_fd(rad_listen_t *this)
 		 *	Requests are still using the socket.  Wait for
 		 *	them to finish.
 		 */
-		if (this->count > 0
-#ifdef WITH_COA_SINGLE_TUNNEL
-		    || proxy_listener->count > 0
-#endif
-		    ) {
+		if (this->count > 0) {
 			struct timeval when;
 			listen_socket_t *sock = this->data;
 
@@ -5446,11 +5408,6 @@ static void event_new_fd(rad_listen_t *this)
 
 		fr_event_fd_delete(el, 0, this->fd);
 		this->status = RAD_LISTEN_STATUS_REMOVE_NOW;
-#ifdef WITH_COA_SINGLE_TUNNEL
-		if(this->with_coa && this->reverse_listener) {
-			this->reverse_listener->status = RAD_LISTEN_STATUS_REMOVE_NOW;
-		}
-#endif
 	}
 
 	/*
@@ -5468,19 +5425,19 @@ static void event_new_fd(rad_listen_t *this)
 		 */
 		if (this->type == RAD_LISTEN_PROXY
 #ifdef  WITH_COA_SINGLE_TUNNEL
-			|| (this->with_coa && this->reverse_listener)
+			|| this->with_coa
 #endif
 		    )
                 {
 			PTHREAD_MUTEX_LOCK(&proxy_mutex);
 			if (!fr_packet_list_socket_freeze(proxy_list,
-							  proxy_listener->fd)) {
+							  this->fd)) {
 				ERROR("Fatal error freezing socket: %s", fr_strerror());
 				fr_exit(1);
 			}
 
-			if (proxy_listener->count > 0) {
-				fr_packet_list_walk(proxy_list, proxy_listener, proxy_eol_cb);
+			if (this->count > 0) {
+				fr_packet_list_walk(proxy_list, this, proxy_eol_cb);
 			}
 			PTHREAD_MUTEX_UNLOCK(&proxy_mutex);
 		}
@@ -5490,11 +5447,7 @@ static void event_new_fd(rad_listen_t *this)
 		 *	Requests are still using the socket.  Wait for
 		 *	them to finish.
 		 */
-		if (this->count > 0
-#ifdef WITH_COA_SINGLE_TUNNEL
-		    || proxy_listener->count > 0
-#endif
-		    ) {
+		if (this->count > 0) {
 			struct timeval when;
 			listen_socket_t *sock = this->data;
 
@@ -5519,11 +5472,6 @@ static void event_new_fd(rad_listen_t *this)
 		 *	No one is using the socket.  We can remove it now.
 		 */
 		this->status = RAD_LISTEN_STATUS_REMOVE_NOW;
-#ifdef WITH_COA_SINGLE_TUNNEL
-		if(this->with_coa && this->reverse_listener) {
-			this->reverse_listener->status = RAD_LISTEN_STATUS_REMOVE_NOW;
-		}
-#endif
 	} /* socket is at EOL */
 #endif	  /* WITH_TCP */
 
@@ -5589,13 +5537,13 @@ static void event_new_fd(rad_listen_t *this)
 
 		if (this->type == RAD_LISTEN_PROXY
 #ifdef	WITH_COA_SINGLE_TUNNEL
-			|| (this->with_coa && this->reverse_listener)
+			|| this->with_coa
 #endif
 		   ) {
 			PTHREAD_MUTEX_LOCK(&proxy_mutex);
-			fr_packet_list_walk(proxy_list, proxy_listener, eol_proxy_listener);
+			fr_packet_list_walk(proxy_list, this, eol_proxy_listener);
 
-			if (!fr_packet_list_socket_del(proxy_list, proxy_listener->fd)) {
+			if (!fr_packet_list_socket_del(proxy_list, this->fd)) {
 				ERROR("Fatal error removing socket %s: %s",
 				      buffer, fr_strerror());
 				fr_exit(1);

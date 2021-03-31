@@ -77,12 +77,6 @@ static void tls_socket_close(rad_listen_t *listener)
 
 	listener->status = RAD_LISTEN_STATUS_EOL;
 	listener->tls = NULL; /* parent owns this! */
-#ifdef WITH_COA_SINGLE_TUNNEL
-	if(listener->with_coa && listener->reverse_listener) {
-		listener->reverse_listener->status = RAD_LISTEN_STATUS_EOL;
-		listener->reverse_listener->tls = NULL;
-	}
-#endif
 
 	/*
 	 *	Tell the event handler that an FD has disappeared.
@@ -566,7 +560,7 @@ int dual_tls_send_req(rad_listen_t *listener, REQUEST *request)
 
 	VERIFY_REQUEST(request);
 
-	rad_assert(listener->send == dual_tls_send_req);
+	rad_assert(listener->send_proxy == dual_tls_send_req);
 
 	if (listener->status != RAD_LISTEN_STATUS_KNOWN) return 0;
 
@@ -859,11 +853,9 @@ int proxy_tls_recv(rad_listen_t *listener)
 
 #ifdef WITH_COA_SINGLE_TUNNEL
 	if(is_request) {
-		rad_listen_t *reversed_listener = listener->reverse_listener;
-		rad_assert(reversed_listener != NULL);
 		packet = talloc_steal(NULL, packet);
 
-		if(!request_receive(NULL, reversed_listener, packet, client, rad_coa_recv)) {
+		if(!request_receive(NULL, listener, packet, client, rad_coa_recv)) {
 			FR_STATS_INC(auth, total_packets_dropped);
 			rad_free(&packet);
 			return 0;
@@ -895,7 +887,7 @@ int proxy_tls_send(rad_listen_t *listener, REQUEST *request)
 	 *	if there's no packet, encode it here.
 	 */
 	if (!request->proxy->data) {
-		request->proxy_listener->encode(request->proxy_listener,
+		request->proxy_listener->encode_proxy(request->proxy_listener,
 						request);
 	}
 
