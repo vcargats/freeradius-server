@@ -1,4 +1,3 @@
-
 BUILD_PATH      := $(top_builddir)/build
 TEST_PATH       := $(top_builddir)/src/tests/radsec
 BIN_PATH        := $(BUILD_PATH)/bin/local
