@@ -52,6 +52,33 @@ RCSID("$Id$")
 #include <sys/stat.h>
 #endif
 
+
+#ifdef WITH_COA_SINGLE_TUNNEL
+
+#include <pthread.h>
+pthread_mutex_t		tree_keymutex;
+pthread_mutex_t		tree_addrmutex;
+pthread_mutexattr_t	tree_mutexattr;
+
+static rbtree_t		*tree_key   = NULL;	/* listener instance by its key (TCP-Session-Key) */
+static rbtree_t		*tree_addr  = NULL;	/* listener instance by its ip address */
+
+typedef struct radlisten_node_t radlisten_node_t;
+typedef struct radlisten_list_t radlisten_list_t;
+
+struct radlisten_node_t {
+	radlisten_node_t    *next;
+	rad_listen_t	    *listener;
+};
+
+struct radlisten_list_t {
+	radlisten_node_t    *head;
+	radlisten_node_t    *tail;
+	radlisten_node_t    *current;		/* to round-robin */
+	size_t		    num;
+};
+#endif /* WITH_COA_SINGLE_TUNNEL */
+
 #ifdef DEBUG_PRINT_PACKET
 static void print_packet(RADIUS_PACKET *packet)
 {
@@ -67,6 +94,11 @@ static void print_packet(RADIUS_PACKET *packet)
 #endif
 
 
+#ifdef WITH_COA_SINGLE_TUNNEL
+static void radlisten_list_free(void *list);
+static void listener_forget(rad_listen_t *listener);
+static void listener_store_byaddr(rad_listen_t *listener, fr_ipaddr_t const *ipaddr);
+#endif
 static rad_listen_t *listen_alloc(TALLOC_CTX *ctx, RAD_LISTEN_TYPE type);
 
 #ifdef WITH_COMMAND_SOCKET
@@ -359,6 +391,9 @@ int rad_status_server(REQUEST *request)
 {
 	int rcode = RLM_MODULE_OK;
 	DICT_VALUE *dval;
+#ifdef WITH_COA_SINGLE_TUNNEL
+	VALUE_PAIR *vp = NULL;
+#endif
 
 	switch (request->listener->type) {
 #ifdef WITH_STATS
@@ -368,6 +403,17 @@ int rad_status_server(REQUEST *request)
 		dval = dict_valbyname(PW_AUTZ_TYPE, 0, "Status-Server");
 		if (dval) {
 			rcode = process_authorize(dval->value, request);
+#ifdef WITH_COA_SINGLE_TUNNEL
+			if(request->listener->with_coa &&
+			    (vp = fr_pair_find_by_num(request->config, PW_TCP_SESSION_KEY, 0, TAG_ANY))) {
+				char const *key = vp->vp_strvalue;
+				/* do not overwrite */
+				if(!request->listener->key) {
+					RDEBUG2("Set current tunnel by key %s", key);
+					listener_store_bykey(request->listener, key);
+				}
+			}
+#endif
 		} else {
 			rcode = RLM_MODULE_OK;
 		}
@@ -735,6 +781,33 @@ static int dual_tcp_accept(rad_listen_t *listener)
 #endif
 	}
 
+#ifdef WITH_COA_SINGLE_TUNNEL
+	if(this->with_coa) {
+
+		this->send_proxy = dual_tls_send_req;
+		this->encode_proxy = master_listen[RAD_LISTEN_PROXY].encode;
+		this->decode_proxy = master_listen[RAD_LISTEN_PROXY].decode;
+
+		listener_store_byaddr(this, &sock->other_ipaddr);
+
+		home_server_t *home = talloc_zero(this, home_server_t);
+		{
+			home->ipaddr = sock->other_ipaddr;
+			home->port = sock->other_port;
+			home->proto = sock->proto;
+			home->secret = sock->client->secret;
+
+			home->coa_irt = this->coa_irt;
+			home->coa_mrt = this->coa_mrt;
+			home->coa_mrc = this->coa_mrc;
+			home->coa_mrd = this->coa_mrd;
+			home->coa_server = this->server;
+		}
+
+		sock->home = home;
+	}
+#endif
+
 	/*
 	 *	FIXME: set O_NONBLOCK on the accept'd fd.
 	 *	See djb's portability rants for details.
@@ -794,6 +867,12 @@ int common_socket_print(rad_listen_t const *this, char *buffer, size_t bufsize)
 #ifdef WITH_TCP
 	if (this->dual) {
 		ADDSTRING("+acct");
+	}
+#endif
+
+#ifdef WITH_COA_SINGLE_TUNNEL
+	if(this->with_coa) {
+		ADDSTRING("+coa");
 	}
 #endif
 
@@ -932,6 +1011,16 @@ static CONF_PARSER limit_config[] = {
 	CONF_PARSER_TERMINATOR
 };
 
+#ifdef WITH_COA_SINGLE_TUNNEL
+static CONF_PARSER coa_config[] = {
+	{ "irt",  FR_CONF_OFFSET(PW_TYPE_INTEGER, rad_listen_t, coa_irt), STRINGIFY(2) },
+	{ "mrt",  FR_CONF_OFFSET(PW_TYPE_INTEGER, rad_listen_t, coa_mrt), STRINGIFY(16) },
+	{ "mrc",  FR_CONF_OFFSET(PW_TYPE_INTEGER, rad_listen_t, coa_mrc), STRINGIFY(5) },
+	{ "mrd",  FR_CONF_OFFSET(PW_TYPE_INTEGER, rad_listen_t, coa_mrd), STRINGIFY(30) },
+	CONF_PARSER_TERMINATOR
+};
+#endif
+
 
 #ifdef WITH_TCP
 /*
@@ -951,15 +1040,61 @@ static int listener_cmp(void const *one, void const *two)
 	return 0;
 }
 
+#   ifdef WITH_COA_SINGLE_TUNNEL
+static int listenernode_key_cmp(void const *one, void const *two)
+{
+	rad_listen_t const *a = ((radlisten_node_t const*)one)->listener;
+	rad_listen_t const *b = ((radlisten_node_t const*)two)->listener;
+
+	rad_assert(a->key && b->key);
+
+	return strcmp(a->key, b->key);
+
+}
+
+static int listenerlist_key_cmp(void const *one, void const *two)
+{
+	radlisten_list_t const *a = one;
+	radlisten_list_t const *b = two;
+
+	rad_assert(a->head && b->head);
+
+	return listenernode_key_cmp(a->head, b->head);
+}
+
+static int listenernode_addr_cmp(void const *one, void const *two)
+{
+	rad_listen_t const *a = ((radlisten_node_t const*)one)->listener;
+	rad_listen_t const *b = ((radlisten_node_t const*)two)->listener;
+
+	rad_assert(a->data && b->data);
+
+	fr_ipaddr_t aip = ((listen_socket_t*)a->data)->other_ipaddr;
+	fr_ipaddr_t bip = ((listen_socket_t*)b->data)->other_ipaddr;
+
+	return fr_ipaddr_cmp(&aip, &bip);
+}
+
+static int listenerlist_addr_cmp(void const *one, void const *two)
+{
+	radlisten_list_t const *a = one;
+	radlisten_list_t const *b = two;
+
+	rad_assert(a->head && b->head);
+
+	return listenernode_addr_cmp(a->head, b->head);
+}
+#   endif /* WITH_COA_SINGLE_TUNNEL */
+
 static int listener_unlink(UNUSED void *ctx, UNUSED void *data)
 {
 	return 2;		/* unlink this node from the tree */
 }
-#endif
+#endif /* WITH_TCP */
 
 
 /*
- *	Parse an authentication or accounting socket.
+ *	Parse an status/proxy/auth/acct/coa sockets.
  */
 int common_socket_parse(CONF_SECTION *cs, rad_listen_t *this)
 {
@@ -1404,7 +1539,7 @@ static int acct_socket_send(rad_listen_t *listener, REQUEST *request)
 static int proxy_socket_send(rad_listen_t *listener, REQUEST *request)
 {
 	rad_assert(request->proxy_listener == listener);
-	rad_assert(listener->send == proxy_socket_send);
+	rad_assert(listener->send_proxy == proxy_socket_send);
 
 	if (rad_send(request->proxy, NULL,
 		     request->home_server->secret) < 0) {
@@ -2739,6 +2874,10 @@ static int _listener_free(rad_listen_t *this)
 			rbtree_walk(this->children, RBTREE_DELETE_ORDER, listener_unlink, this);
 		}
 
+#ifdef WITH_COA_SINGLE_TUNNEL
+		if(this->with_coa) listener_forget(this);
+#endif
+
 #ifdef WITH_TLS
 		/*
 		 *	Note that we do NOT free this->tls, as the
@@ -2764,7 +2903,6 @@ static int _listener_free(rad_listen_t *this)
 	return 0;
 }
 
-
 /*
  *	Allocate & initialize a new listener.
  */
@@ -2776,10 +2914,17 @@ static rad_listen_t *listen_alloc(TALLOC_CTX *ctx, RAD_LISTEN_TYPE type)
 
 	this->type = type;
 	this->recv = master_listen[this->type].recv;
-	this->send = master_listen[this->type].send;
 	this->print = master_listen[this->type].print;
-	this->encode = master_listen[this->type].encode;
-	this->decode = master_listen[this->type].decode;
+
+	if(type == RAD_LISTEN_PROXY) {
+		this->send_proxy = master_listen[this->type].send;
+		this->encode_proxy = master_listen[this->type].encode;
+		this->decode_proxy = master_listen[this->type].decode;
+	} else {
+		this->send = master_listen[this->type].send;
+		this->encode = master_listen[this->type].encode;
+		this->decode = master_listen[this->type].decode;
+	}
 
 	talloc_set_destructor(this, _listener_free);
 
@@ -2877,10 +3022,33 @@ rad_listen_t *proxy_new_listener(TALLOC_CTX *ctx, home_server_t *home, uint16_t 
 		}
 
 		this->recv = proxy_tls_recv;
-		this->send = proxy_tls_send;
+		this->send_proxy = proxy_tls_send;
+
+#   ifdef WITH_COA_SINGLE_TUNNEL
+		if(home->with_coa) {
+
+			this->with_coa = home->with_coa;
+
+			this->send = proxy_tls_send_reply;
+			this->encode = master_listen[RAD_LISTEN_AUTH].encode;
+			this->decode = master_listen[RAD_LISTEN_AUTH].decode;
+
+			RADCLIENT *client = talloc_zero(sock, RADCLIENT);
+			{
+				client->ipaddr = sock->other_ipaddr;
+				client->src_ipaddr = sock->my_ipaddr;
+				client->longname = client->shortname = talloc_typed_strdup(client, home->name);
+				client->secret = talloc_typed_strdup(client, home->secret);
+				client->nas_type = "none";
+				client->server = talloc_typed_strdup(client, home->coa_server);
+			}
+
+			sock->client = client;
+		}
+#   endif
 	}
-#endif
-#endif
+#endif	/* WITH_TLS */
+#endif	/* WITH_TCP */
 	/*
 	 *	Figure out which port we were bound to.
 	 */
@@ -2924,9 +3092,15 @@ static const FR_NAME_NUMBER listen_compare[] = {
 	{ "status",	RAD_LISTEN_NONE },
 #endif
 	{ "auth",	RAD_LISTEN_AUTH },
+#ifdef WITH_COA_SINGLE_TUNNEL
+	{ "auth+coa",	RAD_LISTEN_AUTH },
+#endif
 #ifdef WITH_ACCOUNTING
-	{ "acct",	RAD_LISTEN_ACCT },
-	{ "auth+acct",	RAD_LISTEN_AUTH },
+	{ "acct",	        RAD_LISTEN_ACCT },
+	{ "auth+acct",	        RAD_LISTEN_AUTH },
+#   ifdef WITH_COA_SINGLE_TUNNEL
+	{ "auth+acct+coa",	RAD_LISTEN_AUTH },
+#   endif
 #endif
 #ifdef WITH_DETAIL
 	{ "detail",	RAD_LISTEN_DETAIL },
@@ -2964,6 +3138,9 @@ static rad_listen_t *listen_parse(CONF_SECTION *cs, char const *server)
 	char const	*value;
 	fr_dlhandle	handle;
 	CONF_SECTION	*server_cs;
+#ifdef WITH_COA_SINGLE_TUNNEL
+	CONF_SECTION	*coa;
+#endif
 	char		buffer[32];
 
 	cp = cf_pair_find(cs, "type");
@@ -3074,10 +3251,19 @@ static rad_listen_t *listen_parse(CONF_SECTION *cs, char const *server)
 
 #ifdef WITH_TCP
 	/*
-	 *	Special-case '+' for "auth+acct".
+	 *	Special-case '+' for "auth+acct" and "auth+coa"/"auth+acct+coa"
 	 */
-	if (strchr(listen_type, '+') != NULL) {
+	char *plus_loc = NULL;
+	if ((plus_loc = strchr(listen_type, '+')) != NULL) {
 		this->dual = true;
+#   ifdef WITH_COA_SINGLE_TUNNEL
+		if (strchr(plus_loc + 1, '+') != NULL) {
+			this->with_coa = true;
+		} else if (strcmp(plus_loc + 1, "coa") == 0) {
+			this->dual = false;
+			this->with_coa = true;
+		}
+#   endif
 	}
 #endif
 
@@ -3096,6 +3282,42 @@ static rad_listen_t *listen_parse(CONF_SECTION *cs, char const *server)
 		listen_free(&this);
 		return NULL;
 	}
+
+#ifdef WITH_COA_SINGLE_TUNNEL
+	if(this->with_coa && !this->tls) {
+		cf_log_err_cs(cs, "Type \"+coa\" is available for TLS transport only");
+		listen_free(&this);
+		return NULL;
+	}
+
+	coa = cf_section_sub_find(cs, "coa");
+	if (coa) {
+		if(!this->with_coa) {
+			cf_log_err_cs(cs, "Invalid section \"coa\" for this listener type");
+			listen_free(&this);
+			return NULL;
+		}
+
+		rcode = cf_section_parse(cs, this, coa_config);
+		if (rcode < 0) {
+			listen_free(&this);
+			return NULL;
+		}
+
+		/*
+		 * Same boundary checks as for home server
+		 */
+		FR_INTEGER_BOUND_CHECK("coa_irt", this->coa_irt, >=, 1);
+		FR_INTEGER_BOUND_CHECK("coa_irt", this->coa_irt, <=, 5);
+
+		FR_INTEGER_BOUND_CHECK("coa_mrc", this->coa_mrc, <=, 20);
+
+		FR_INTEGER_BOUND_CHECK("coa_mrt", this->coa_mrt, <=, 30);
+
+		FR_INTEGER_BOUND_CHECK("coa_mrd", this->coa_mrd, >=, 5);
+		FR_INTEGER_BOUND_CHECK("coa_mrd", this->coa_mrd, <=, 60);
+	}
+#endif	/* WITH_COA_SINGLE_TUNNEL */
 
 	cf_log_info(cs, "}");
 
@@ -3398,6 +3620,40 @@ add_sockets:
 		}
 	}
 
+#ifdef WITH_COA_SINGLE_TUNNEL
+	if(pthread_mutexattr_init(&tree_mutexattr) != 0
+	    || pthread_mutexattr_settype(&tree_mutexattr, PTHREAD_MUTEX_RECURSIVE) != 0)
+	{
+		ERROR("FATAL: Failed to initialize tree mutex attributes: %s",
+		       fr_syserror(errno));
+		fr_exit(1);
+	}
+
+	if (pthread_mutex_init(&tree_keymutex, &tree_mutexattr) != 0)
+	{
+		ERROR("FATAL: Failed to initialize tree key mutex: %s",
+		       fr_syserror(errno));
+		fr_exit(1);
+	}
+
+	if (pthread_mutex_init(&tree_addrmutex, &tree_mutexattr) != 0)
+	{
+		ERROR("FATAL: Failed to initialize tree key mutex: %s",
+		       fr_syserror(errno));
+		fr_exit(1);
+	}
+
+	tree_key =
+	    rbtree_create(NULL, listenerlist_key_cmp, radlisten_list_free, RBTREE_FLAG_REPLACE);
+	tree_addr =
+	    rbtree_create(NULL, listenerlist_addr_cmp, radlisten_list_free, RBTREE_FLAG_REPLACE);
+
+	if (!tree_addr || !tree_addr) {
+		ERROR("Out of memory");
+		fr_exit(1);
+	}
+#endif	/* WITH_COA_SINGLE_TUNNEL */
+
 	/*
 	 *	Haven't defined any sockets.  Die.
 	 */
@@ -3423,6 +3679,17 @@ void listen_free(rad_listen_t **head)
 	}
 
 	*head = NULL;
+}
+
+void listen_destroy(void)
+{
+#ifdef WITH_COA_SINGLE_TUNNEL
+	rbtree_free(tree_key), rbtree_free(tree_addr);
+	tree_key = NULL, tree_addr = NULL;
+	pthread_mutex_destroy(&tree_keymutex);
+	pthread_mutex_destroy(&tree_addrmutex);
+	pthread_mutexattr_destroy(&tree_mutexattr);
+#endif
 }
 
 #ifdef WITH_STATS
@@ -3488,3 +3755,235 @@ rad_listen_t *listener_find_byipaddr(fr_ipaddr_t const *ipaddr, uint16_t port, i
 
 	return NULL;
 }
+
+#ifdef WITH_COA_SINGLE_TUNNEL
+static void radlisten_list_free(void *list)
+{
+	radlisten_list_t *l = (radlisten_list_t*)list;
+	{
+		l->head = NULL;
+		l->tail = NULL;
+		l->current = NULL;
+		l->num = 0;
+	}
+
+	talloc_free(l);
+}
+
+static radlisten_list_t *listener_findlist_bykey(char const *key)
+{
+	rad_listen_t mylistener;
+	radlisten_node_t mynode = { NULL /* next */, &mylistener};
+	radlisten_list_t mylisteners = { &mynode, NULL, NULL, 1 /* num */ };
+	radlisten_list_t *ret = NULL;
+
+	mylistener.key = key;
+
+	ret = rbtree_finddata(tree_key, &mylisteners);
+
+	return ret;
+}
+
+rad_listen_t *listener_find_bykey(char const *key, size_t *listcount)
+{
+	rad_listen_t *ret = NULL;
+	radlisten_list_t *list;
+
+	pthread_mutex_lock(&tree_keymutex);
+
+	list = listener_findlist_bykey(key);
+	if(list) {	    /* select round-robin */
+		/*
+		 * Fresh list current points to head, so iteration
+		 * starts from the second node, but that's just fine
+		 */
+		rad_assert(list->current);
+		radlisten_node_t *next = list->current->next;
+		if(!next) next = list->head;	/* end of the list */
+
+		list->current = next;
+		ret = next->listener;
+
+		if(listcount) *listcount = list->num;
+	}
+
+	pthread_mutex_unlock(&tree_keymutex);
+
+	return ret;
+}
+
+static radlisten_list_t *listener_findlist_byaddr(fr_ipaddr_t const *ipaddr)
+{
+	listen_socket_t mysocket;
+	rad_listen_t mylistener;
+	radlisten_node_t mynode = { NULL /* next */, &mylistener};
+	radlisten_list_t mylisteners = { &mynode, NULL, NULL, 1 /* num */};
+
+	mysocket.other_ipaddr = *ipaddr;
+	mylistener.data = &mysocket;
+
+	return rbtree_finddata(tree_addr, &mylisteners);
+}
+
+rad_listen_t *listener_find_byaddr(fr_ipaddr_t const *ipaddr, uint16_t port, size_t *listcount)
+{
+	rad_listen_t *ret = NULL;
+	radlisten_list_t *list;
+
+	pthread_mutex_lock(&tree_addrmutex);
+
+	list = listener_findlist_byaddr(ipaddr);
+	if(list) {
+		if(port) { /* find exact listener */
+			radlisten_node_t *it = list->head;
+			while(it) {
+				uint16_t lport = ((listen_socket_t*)it->listener->data)->other_port;
+				if(port == lport) {
+					ret = it->listener;
+					break;
+				}
+				it = it->next;
+			}
+		} else {    /* select round-robin */
+			rad_assert(list->current);
+			radlisten_node_t *next = list->current->next;
+			if(!next) next = list->head;	/* end of the list */
+
+			list->current = next;
+			ret = next->listener;
+		}
+
+		if(listcount) *listcount = list->num;
+	}
+
+	pthread_mutex_unlock(&tree_addrmutex);
+	return ret;
+}
+
+static void listener_remove_fromtree(
+    rbtree_t *tree, pthread_mutex_t *tree_mutex, rad_listen_t *listener)
+{
+	void* rbnode;
+	radlisten_list_t *list;
+
+	radlisten_node_t *prev = NULL, *it;
+
+	radlisten_node_t mynode = { NULL, listener };
+	radlisten_list_t mylisteners = { &mynode, NULL, NULL, 1 /* num */ };
+
+	pthread_mutex_lock(tree_mutex);
+
+	rbnode = rbtree_find(tree, &mylisteners);
+	list = rbtree_node2data(tree, rbnode);
+
+	if(!list) goto out; /* key may not exist yet */
+
+	it = list->head;
+
+	while(it && it->listener != listener) {
+	    prev = it, it = it->next;
+	}
+
+	if(it) {
+		radlisten_node_t* next = it->next;
+
+		talloc_free(it);
+
+		list->num--;
+
+		/* list is [0, n] */
+		if(prev) { /* 0 < it <= n */
+			prev->next = next;
+			if(list->tail == it) list->tail = prev;
+			if(list->current == it) list->current = prev;
+		} else if(next) { /* it == 0, n > 0 */
+			list->head = next;
+			if(list->current == it) list->current = next;
+		} else {    /* single element list */
+			rbtree_delete(tree, rbnode);  /* lists and nodes are removed as well */
+		}
+
+	} else {
+		DEBUG("Cannot find listener in list");
+	}
+
+out:
+	pthread_mutex_unlock(tree_mutex);
+}
+
+static void listener_forget(rad_listen_t *listener)
+{
+	if(!listener->with_coa) return;
+
+	listener_remove_fromtree(tree_key, &tree_keymutex, listener);
+	listener_remove_fromtree(tree_addr, &tree_addrmutex, listener);
+}
+
+static radlisten_node_t* radlisten_node_init(radlisten_list_t *list, rad_listen_t *listener)
+{
+	radlisten_node_t *node = talloc_zero(list, radlisten_node_t);
+	node->next = NULL;
+	node->listener = listener;
+
+	return node;
+}
+
+static void listener_store_byaddr(rad_listen_t *listener, fr_ipaddr_t const *ipaddr)
+{
+	radlisten_list_t *list;
+
+	if(!listener->with_coa) return;
+
+	pthread_mutex_lock(&tree_addrmutex);
+
+	list = listener_findlist_byaddr(ipaddr);
+
+	if(list) {
+		radlisten_node_t *node = radlisten_node_init(list, listener);
+		list->tail->next    = node;
+		list->tail	    = node;
+	} else {
+		list = talloc_zero(tree_addr, radlisten_list_t);
+		list->head = radlisten_node_init(list, listener);
+		list->tail = list->head;
+		list->current = list->head;
+		rbtree_insert(tree_addr, list);
+	}
+
+	list->num++;
+
+	pthread_mutex_unlock(&tree_addrmutex);
+}
+
+void listener_store_bykey(rad_listen_t *listener, const char *newkey)
+{
+	radlisten_list_t *list;
+
+	if(!listener->with_coa) return;
+
+	rad_assert(newkey);
+
+	pthread_mutex_lock(&tree_keymutex);
+
+	listener->key = talloc_typed_strdup(listener, newkey);
+	list = listener_findlist_bykey(newkey);
+
+	if(list) {
+		radlisten_node_t *node = radlisten_node_init(list, listener);
+		list->tail->next    = node;
+		list->tail	    = node;
+	} else {
+		list = talloc_zero(tree_key, radlisten_list_t);
+		radlisten_node_t *node = radlisten_node_init(list, listener);
+		list->head = node;
+		list->tail = node;
+		list->current = node;
+		rbtree_insert(tree_key, list);
+	}
+
+	list->num++;
+
+	pthread_mutex_unlock(&tree_keymutex);
+}
+
+#endif	/* WITH_COA_SINGLE_TUNNEL */

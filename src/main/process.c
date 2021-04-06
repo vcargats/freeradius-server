@@ -1984,7 +1984,7 @@ static REQUEST *request_setup(TALLOC_CTX *ctx, rad_listen_t *listener, RADIUS_PA
 	/*
 	 *	Set virtual server identity
 	 */
-	if (client->server) {
+	if (client && client->server) {
 		request->server = client->server;
 	} else if (listener->server) {
 		request->server = listener->server;
@@ -2086,7 +2086,12 @@ static void tcp_socket_timer(void *ctx)
 			 *	open to listen for replies to requests we had
 			 *	previously sent.
 			 */
-			if (listener->type == RAD_LISTEN_PROXY) {
+			if (listener->type == RAD_LISTEN_PROXY
+#ifdef WITH_COA_SINGLE_TUNNEL
+			    || listener->with_coa
+#endif
+			    )
+			{
 				PTHREAD_MUTEX_LOCK(&proxy_mutex);
 				if (!fr_packet_list_socket_freeze(proxy_list,
 								  listener->fd)) {
@@ -2310,12 +2315,16 @@ static int insert_into_proxy_hash(REQUEST *request)
 
 
 	PTHREAD_MUTEX_LOCK(&proxy_mutex);
-	proxy_listener = NULL;
+	/*
+	 * proxy listener may be preset already if coa is sent through the
+	 * reverse connection (auth+coa/auth+acct+coa)
+	 * */
+	proxy_listener = request->proxy_listener;
 	request->num_proxied_requests = 1;
 	request->num_proxied_responses = 0;
 
 	for (tries = 0; tries < 2; tries++) {
-		rad_listen_t *this;
+		rad_listen_t *this = proxy_listener;
 		listen_socket_t *sock;
 
 		RDEBUG3("proxy: Trying to allocate ID (%d/2)", tries);
@@ -2325,6 +2334,10 @@ static int insert_into_proxy_hash(REQUEST *request)
 		if (success) break;
 
 		if (tries > 0) continue; /* try opening new socket only once */
+
+#ifdef WITH_COA_SINGLE_TUNNEL
+		if(request->proxy_listener) break; /* not opening new socket */
+#endif
 
 #ifdef HAVE_PTHREAD_H
 		if (proxy_no_new_sockets) break;
@@ -2485,7 +2498,7 @@ static int process_proxy_reply(REQUEST *request, RADIUS_PACKET *reply)
 		 *	Decode the packet if required.
 		 */
 		if (request->proxy_listener) {
-			rcode = request->proxy_listener->decode(request->proxy_listener, request);
+			rcode = request->proxy_listener->decode_proxy(request->proxy_listener, request);
 			debug_packet(request, reply, true);
 
 			/*
@@ -2513,7 +2526,10 @@ static int process_proxy_reply(REQUEST *request, RADIUS_PACKET *reply)
 	 */
 	if (request->home_server && request->home_server->server) {
 		request->server = request->home_server->server;
-
+#ifdef WITH_COA_SINGLE_TUNNEL
+	} else if (request->home_server && request->home_server->coa_server) {
+		request->server = request->home_server->coa_server;
+#endif
 	} else {
 		if (request->home_pool && request->home_pool->virtual_server) {
 			request->server = request->home_pool->virtual_server;
@@ -3414,7 +3430,10 @@ static int request_proxy(REQUEST *request)
 
 	/*
 	 *	We're actually sending a proxied packet.  Do that now.
+	 *	insert_into_proxy_hash behaves differently if request->proxy_listener is
+	 *	already set, so make sure it is not set.
 	 */
+	rad_assert(request->proxy_listener == NULL);
 	if (!request->in_proxy_hash && !insert_into_proxy_hash(request)) {
 		RPROXY("Failed to insert request into the proxy list");
 		return -1;
@@ -3453,7 +3472,7 @@ static int request_proxy(REQUEST *request)
 	/*
 	 *	Encode the packet before we do anything else.
 	 */
-	request->proxy_listener->encode(request->proxy_listener, request);
+	request->proxy_listener->encode_proxy(request->proxy_listener, request);
 	debug_packet(request, request->proxy, false);
 
 	/*
@@ -3473,7 +3492,7 @@ static int request_proxy(REQUEST *request)
 	/*
 	 *	And send the packet.
 	 */
-	request->proxy_listener->send(request->proxy_listener, request);
+	request->proxy_listener->send_proxy(request->proxy_listener, request);
 	return 1;
 }
 
@@ -3549,6 +3568,11 @@ static int request_proxy_anew(REQUEST *request)
 
 	home_server_update_request(home, request);
 
+	/*
+	 * insert_into_proxy_hash behaves differently if request->proxy_listener
+	 * is already set, so make sure it is not set.
+	 */
+	rad_assert(request->proxy_listener == NULL);
 	if (!insert_into_proxy_hash(request)) {
 		RPROXY("Failed to insert retransmission into the proxy list");
 		goto post_proxy_fail;
@@ -3817,7 +3841,7 @@ static void ping_home_server(void *ctx)
 
 	rad_assert(request->proxy_listener != NULL);
 	debug_packet(request, request->proxy, false);
-	request->proxy_listener->send(request->proxy_listener,
+	request->proxy_listener->send_proxy(request->proxy_listener,
 				      request);
 
 	/*
@@ -4095,7 +4119,7 @@ static void proxy_wait_for_reply(REQUEST *request, int action)
 		home->last_packet_sent = now.tv_sec;
 		request->proxy->timestamp = now;
 		debug_packet(request, request->proxy, false);
-		request->proxy_listener->send(request->proxy_listener, request);
+		request->proxy_listener->send_proxy(request->proxy_listener, request);
 		break;
 
 	case FR_ACTION_TIMER:
@@ -4257,6 +4281,11 @@ static void request_coa_originate(REQUEST *request)
 	REQUEST *coa;
 	fr_ipaddr_t ipaddr;
 	char buffer[256];
+#ifdef WITH_COA_SINGLE_TUNNEL
+	size_t listcount = 0;
+	bool ipaddrset = false;
+	rad_listen_t *send_listener = NULL;
+#endif
 
 	VERIFY_REQUEST(request);
 
@@ -4299,10 +4328,16 @@ static void request_coa_originate(REQUEST *request)
 		ipaddr.af = AF_INET;
 		ipaddr.ipaddr.ip4addr.s_addr = vp->vp_ipaddr;
 		ipaddr.prefix = 32;
+#ifdef WITH_COA_SINGLE_TUNNEL
+                ipaddrset = true;
+#endif
 	} else if ((vp = fr_pair_find_by_num(coa->proxy->vps, PW_PACKET_DST_IPV6_ADDRESS, 0, TAG_ANY)) != NULL) {
 		ipaddr.af = AF_INET6;
 		ipaddr.ipaddr.ip6addr = vp->vp_ipv6addr;
 		ipaddr.prefix = 128;
+#ifdef WITH_COA_SINGLE_TUNNEL
+                ipaddrset = true;
+#endif
 	} else if ((vp = fr_pair_find_by_num(coa->proxy->vps, PW_HOME_SERVER_POOL, 0, TAG_ANY)) != NULL) {
 		coa->home_pool = home_pool_byname(vp->vp_strvalue,
 						  HOME_TYPE_COA);
@@ -4325,6 +4360,11 @@ static void request_coa_originate(REQUEST *request)
 		/*
 		 *	If all else fails, send it to the client that
 		 *	originated this request.
+		 *	Do not set ipaddrset flag to be used in sigle tunnel
+		 *	coa. Otherwise we risk to send CoA not within *exactly*
+		 *	same tunnel but rather a tunnel sharing same ip. If the
+		 *	flag is not set we do send CoA within *exactly* same
+		 *	tunnel if that is supported by the listener.
 		 */
 		memcpy(&ipaddr, &request->packet->src_ipaddr, sizeof(ipaddr));
 	}
@@ -4347,7 +4387,54 @@ static void request_coa_originate(REQUEST *request)
 		if (vp) port = vp->vp_integer;
 
 		coa->home_server = home_server_find(&ipaddr, port, IPPROTO_UDP);
+
+#ifdef WITH_COA_SINGLE_TUNNEL
 		if (!coa->home_server) {
+			const char *key = NULL;
+		try_next:
+			/*
+			* Give one last try to send the request through the TCP auth tunnel
+			* 1. By IP and possibly port
+			*/
+			if(ipaddr.af && ipaddrset) {
+				port = 0;
+				vp = fr_pair_find_by_num(coa->proxy->vps, PW_PACKET_DST_PORT, 0, TAG_ANY);
+				if (vp) port = vp->vp_integer;
+				send_listener = listener_find_byaddr(&ipaddr, port, listcount ? NULL : &listcount);
+			}
+
+			/*
+			 * 2. By explicitly defined key
+			 */
+			if(send_listener) {
+				RDEBUG2("Found tunnel by address %s:%d",
+				    inet_ntop(ipaddr.af, &ipaddr.ipaddr, buffer, sizeof(buffer)), port);
+				goto reverse;
+			} else {
+				vp = fr_pair_find_by_num(coa->proxy->vps, PW_TCP_SESSION_KEY, 0, TAG_ANY);
+				if(vp) key = vp->vp_strvalue;
+				if(key) {
+					send_listener = listener_find_bykey(key, listcount ? NULL : &listcount);
+				}
+			}
+
+			if(send_listener) {
+				RDEBUG2("Found tunnel by key %s", key);
+				goto reverse;
+			} else if(request->listener->with_coa) {
+				RDEBUG2("Found tunnel by itself");
+				send_listener = request->listener;
+				listcount = 1; /* there is no other listener to try with */
+			}
+
+			if(send_listener) {
+			reverse:
+				rad_assert(listcount > 0);
+				coa->home_server = ((listen_socket_t*)send_listener->data)->home;
+			}
+		}
+#endif /* WITH_COA_SINGLE_TUNNEL */
+		if(!coa->home_server) {
 			RWDEBUG2("Unknown destination %s:%d for CoA request.",
 			       inet_ntop(ipaddr.af, &ipaddr.ipaddr,
 					 buffer, sizeof(buffer)), port);
@@ -4409,7 +4496,21 @@ static void request_coa_originate(REQUEST *request)
 		REXDENT();
 		RDEBUG2("}");
 		coa->server = old_server;
-	} else {
+	} else
+#ifdef WITH_COA_SINGLE_TUNNEL
+		if(send_listener) {
+			char const *old_server = coa->server;
+
+			coa->server = send_listener->server;
+			RDEBUG2("server %s {", coa->server);
+			RINDENT();
+			rcode = process_pre_proxy(pre_proxy_type, coa);
+			REXDENT();
+			RDEBUG2("}");
+			coa->server = old_server;
+		} else
+#endif
+	{
 		rcode = process_pre_proxy(pre_proxy_type, coa);
 	}
 	switch (rcode) {
@@ -4425,6 +4526,13 @@ static void request_coa_originate(REQUEST *request)
 		break;
 	}
 
+#ifdef WITH_COA_SINGLE_TUNNEL
+	/*
+	 * If not set here, coa->proxy_listener will be set in
+	 * insert_into_proxy_hash function.
+	 */
+	if(send_listener) coa->proxy_listener = send_listener;
+#endif
 	/*
 	 *	Source IP / port is set when the proxy socket
 	 *	is chosen.
@@ -4433,6 +4541,25 @@ static void request_coa_originate(REQUEST *request)
 	coa->proxy->dst_port = coa->home_server->port;
 
 	if (!insert_into_proxy_hash(coa)) {
+#ifdef WITH_COA_SINGLE_TUNNEL
+		/*
+		 * If several listeners share the same IP or key, we may try
+		 * with another one up to listcount times. Each time we try to
+		 * find next listener we expect to get the next one. Note
+		 * however that this is done on a best-effort basis. In worst
+		 * case the same listener will be returned if some other thread
+		 * searches by same IP or key. I hope that is ok.
+		 */
+		if(send_listener && --listcount) {
+			/*
+			 * TODO: should run virtual server fail
+			 * section here ?
+			 */
+			send_listener = NULL;
+			coa->packet->vps = NULL;
+			goto try_next;
+		}
+#endif
 		radlog_request(L_PROXY, 0, coa, "Failed to insert CoA request into proxy list");
 		goto fail;
 	}
@@ -4460,7 +4587,7 @@ static void request_coa_originate(REQUEST *request)
 	/*
 	 *	Encode the packet before we do anything else.
 	 */
-	coa->proxy_listener->encode(coa->proxy_listener, coa);
+	coa->proxy_listener->encode_proxy(coa->proxy_listener, coa);
 	debug_packet(coa, coa->proxy, false);
 
 #ifdef DEBUG_STATE_MACHINE
@@ -4485,7 +4612,7 @@ static void request_coa_originate(REQUEST *request)
 	/*
 	 *	And send the packet.
 	 */
-	coa->proxy_listener->send(coa->proxy_listener, coa);
+	coa->proxy_listener->send_proxy(coa->proxy_listener, coa);
 }
 
 
@@ -4629,7 +4756,7 @@ static void coa_retransmit(REQUEST *request)
 		request->proxy->dst_port,
 		request->proxy->id);
 
-	request->proxy_listener->send(request->proxy_listener,
+	request->proxy_listener->send_proxy(request->proxy_listener,
 				      request);
 }
 
@@ -5162,6 +5289,8 @@ static void event_new_fd(rad_listen_t *this)
 		 *	Add it to the list of sockets we can use.
 		 *	Server sockets (i.e. auth/acct) are never
 		 *	added to the packet list.
+		 *	auth/acct + coa (with_coa == true) are
+		 *	handled in 'default' case
 		 */
 		case RAD_LISTEN_PROXY:
 #ifdef WITH_TCP
@@ -5210,6 +5339,26 @@ static void event_new_fd(rad_listen_t *this)
 					fr_exit(1);
 				}
 			}
+#ifdef WITH_COA_SINGLE_TUNNEL
+			/*
+			 * In order insert_into_proxy hash function to work we
+			 * need to make sure proxy listener socket is inserted
+			 * into proxy_list as soon as it is created.
+			 * We should do that for listeners that are accepted only,
+			 * not for the listener that accepts, hence check for parrent.
+			 */
+			if(this->with_coa && this->parent) {
+				PTHREAD_MUTEX_LOCK(&proxy_mutex);
+				if(!fr_packet_list_socket_add(proxy_list, this->fd,
+							      sock->proto,
+				    			      &sock->other_ipaddr, sock->other_port,
+				    			      this)) {
+					ERROR("Failed adding proxy socket");
+					fr_exit_now(1);
+				}
+				PTHREAD_MUTEX_UNLOCK(&proxy_mutex);
+			}
+#endif	/* WITH_COA_SINGLE_TUNNEL */
 #endif	/* WITH_TCP */
 			break;
 		} /* switch over listener types */
@@ -5274,7 +5423,12 @@ static void event_new_fd(rad_listen_t *this)
 		/*
 		 *	Tell all requests using this socket that the socket is dead.
 		 */
-		if (this->type == RAD_LISTEN_PROXY) {
+		if (this->type == RAD_LISTEN_PROXY
+#ifdef  WITH_COA_SINGLE_TUNNEL
+			|| this->with_coa
+#endif
+		    )
+                {
 			PTHREAD_MUTEX_LOCK(&proxy_mutex);
 			if (!fr_packet_list_socket_freeze(proxy_list,
 							  this->fd)) {
@@ -5379,7 +5533,13 @@ static void event_new_fd(rad_listen_t *this)
 				INFO(" ... shutting down socket %s (%u of %u)", buffer,
 				     home->limit.num_connections, home->limit.max_connections);
 			}
+		}
 
+		if (this->type == RAD_LISTEN_PROXY
+#ifdef	WITH_COA_SINGLE_TUNNEL
+			|| this->with_coa
+#endif
+		   ) {
 			PTHREAD_MUTEX_LOCK(&proxy_mutex);
 			fr_packet_list_walk(proxy_list, this, eol_proxy_listener);
 
@@ -5389,7 +5549,9 @@ static void event_new_fd(rad_listen_t *this)
 				fr_exit(1);
 			}
 			PTHREAD_MUTEX_UNLOCK(&proxy_mutex);
-		} else
+		}
+
+		if(this->type != RAD_LISTEN_PROXY)
 #endif	/* WITH_PROXY */
 		{
 			INFO(" ... shutting down socket %s", buffer);
@@ -6020,6 +6182,8 @@ void radius_event_free(void)
 
 	if (proxy_ctx) talloc_free(proxy_ctx);
 #endif
+
+	listen_destroy();
 
 	TALLOC_FREE(el);
 

@@ -22,6 +22,10 @@ keywords/*
 auth/*
 	tests of authentication methods.
 
+radsec/*
+	tests of radsec, proxy to radsec server, send CoA in TCP/TLS
+	session opened by the NAD to the server
+
 modules/*
 	tests for individual modules
 

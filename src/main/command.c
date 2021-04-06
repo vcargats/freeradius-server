@@ -1989,8 +1989,11 @@ static int command_inject_file(rad_listen_t *listener, int argc, char *argv[])
 	 *	Re-write the IO for the listener.
 	 */
 	fake->encode = null_socket_dencode;
+	fake->encode_proxy = null_socket_dencode;
 	fake->decode = null_socket_dencode;
+	fake->decode_proxy = null_socket_dencode;
 	fake->send = null_socket_send;
+	fake->send_proxy = null_socket_send;
 
 	packet = rad_alloc(NULL, false);
 	packet->src_ipaddr = sock->src_ipaddr;

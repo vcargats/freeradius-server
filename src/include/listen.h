@@ -73,6 +73,16 @@ struct rad_listen {
 	bool		dual;
 	rbtree_t	*children;
 	rad_listen_t	*parent;
+#   ifdef WITH_COA_SINGLE_TUNNEL
+	bool		with_coa;
+	char const	*key;	/* TCP-Session-Key */
+
+	uint32_t	coa_irt;
+	uint32_t	coa_mrc;
+	uint32_t	coa_mrt;
+	uint32_t	coa_mrd;
+#   endif /* WITH_COA_SINGLE_TUNNEL */
+
 #endif
 	bool		nodup;
 	bool		synchronous;
@@ -83,9 +93,16 @@ struct rad_listen {
 #endif
 
 	rad_listen_recv_t recv;
+
 	rad_listen_send_t send;
+	rad_listen_send_t send_proxy;
+
 	rad_listen_encode_t encode;
+	rad_listen_encode_t encode_proxy;
+
 	rad_listen_decode_t decode;
+	rad_listen_decode_t decode_proxy;
+
 	rad_listen_print_t print;
 
 	CONF_SECTION const *cs;
@@ -118,7 +135,8 @@ typedef struct listen_socket_t {
 	uint32_t	rate_pps_now;
 	uint32_t	max_rate;
 
-	/* for outgoing sockets */
+	/* for outgoing sockets,
+	 * home is used for incoming socket as well if type is auth+coa/auth+acct+coa */
 	home_server_t	*home;
 	fr_ipaddr_t	other_ipaddr;
 	uint16_t	other_port;
@@ -134,6 +152,7 @@ typedef struct listen_socket_t {
 	fr_socket_limit_t limit;
 
 	struct listen_socket_t *parent;
+	/* for outgoing sockets as well if type is auth+coa/auth+acct+coa */
 	RADCLIENT	*client;
 
 	RADIUS_PACKET   *packet; /* for reading partial packets */

@@ -596,6 +596,18 @@ autz_redo:
 authenticate:
 #endif
 
+#ifdef WITH_COA_SINGLE_TUNNEL
+	if(request->listener->with_coa &&
+	    (tmp = fr_pair_find_by_num(request->config, PW_TCP_SESSION_KEY, 0, TAG_ANY))) {
+		char const *key = tmp->vp_strvalue;
+		/* do not overwrite */
+		if(!request->listener->key) {
+			RDEBUG2("Set current tunnel with key %s", key);
+			listener_store_bykey(request->listener, key);
+		}
+	}
+#endif
+
 	/*
 	 *	Validate the user
 	 */

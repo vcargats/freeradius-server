@@ -19,11 +19,15 @@ extern bool home_servers_udp;	//!< Whether there are any UDP home servers
 
 typedef enum {
 	HOME_TYPE_INVALID = 0,
-	HOME_TYPE_AUTH,		//!< Authentication server
-	HOME_TYPE_ACCT,		//!< Accounting server
-	HOME_TYPE_AUTH_ACCT	//!< Authentication and accounting server
+	HOME_TYPE_AUTH,		    //!< Authentication server
+	HOME_TYPE_ACCT,		    //!< Accounting server
+	HOME_TYPE_AUTH_ACCT	    //!< Authentication and accounting server
 
 #ifdef WITH_COA
+#ifdef WITH_COA_SINGLE_TUNNEL
+	,HOME_TYPE_AUTH_COA	    //!< Authentication server and CoA client
+	,HOME_TYPE_AUTH_ACCT_COA    //!< Authentication, accounting server and CoA client
+#endif
 	,HOME_TYPE_COA		//!< CoA destination (NAS or Proxy)
 #endif
 } home_type_t;
@@ -59,6 +63,9 @@ typedef struct home_server {
 							//!< stats or when specifying home servers for a pool.
 
 	bool			dual;			//!< One of a pair of homeservers on consecutive ports.
+#ifdef WITH_COA_SINGLE_TUNNEL
+	bool			with_coa;		//!< Accept CoA requests from the home server
+#endif
 	bool			dynamic;		//!< is this a dynamically added home server?
 	char const		*server;		//!< For internal proxying
 	char const		*parent_server;
@@ -120,6 +127,9 @@ typedef struct home_server {
 	uint32_t		coa_mrc;
 	uint32_t		coa_mrt;
 	uint32_t		coa_mrd;
+#   ifdef WITH_COA_SINGLE_TUNNEL
+	char const		*coa_server;		//!< For accepting incoming coa requests
+#   endif
 #endif
 #ifdef WITH_TLS
 	fr_tls_server_conf_t	*tls;
